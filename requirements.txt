@@ -1,0 +1,8 @@
+# Apple Silicon + Python 3.10-3.12 (3.12 recommended)
+mlx-audio==0.6.4
+fastapi==0.162.0
+uvicorn==0.54.0
+python-multipart==0.0.33
+# Only needed for tests and development
+httpx==0.28.1
+pytest==8.4.2

@@ -1,0 +1,13 @@
+# Local environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+
+# Model weights are downloaded separately; never commit them
+models/
+
+# Runtime state, generated audio, reference recordings and logs
+data/
+outputs/
