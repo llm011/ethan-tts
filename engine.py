@@ -108,6 +108,53 @@ def stream_wav_header() -> bytes:
     )
 
 
+def change_speed(samples: np.ndarray, speed: float) -> np.ndarray:
+    """Change tempo without changing pitch.
+
+    Qwen3-TTS has no native speed parameter (its `speed` argument is documented
+    as "not directly supported yet"). Resampling the token stream would also
+    distort timbre, so tempo is adjusted after generation with ffmpeg atempo,
+    which preserves pitch and formants.
+    """
+    if speed <= 1.0 + 1e-3 and speed >= 1.0 - 1e-3:
+        return samples
+    speed = max(.5, min(2.0, float(speed)))
+    import shutil
+    import subprocess
+    import tempfile
+
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError("语速调整需要 ffmpeg；请先安装，或使用 speed=1.0")
+    pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype("<i2").tobytes()
+    with tempfile.TemporaryDirectory() as tmp:
+        source = Path(tmp) / "in.wav"
+        target = Path(tmp) / "out.wav"
+        with wave.open(str(source), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(SAMPLE_RATE)
+            wav.writeframes(pcm)
+        # atempo accepts 0.5–2.0 per instance; chain filters outside that range.
+        filters = []
+        remaining = speed
+        while remaining > 2.0:
+            filters.append("atempo=2.0")
+            remaining /= 2.0
+        while remaining < .5:
+            filters.append("atempo=0.5")
+            remaining /= .5
+        filters.append(f"atempo={remaining:.6f}")
+        process = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
+             "-filter:a", ",".join(filters), str(target)],
+            capture_output=True, text=True,
+        )
+        if process.returncode:
+            raise RuntimeError(f"语速调整失败：{process.stderr.strip()[-400:]}")
+        with wave.open(str(target), "rb") as wav:
+            return np.frombuffer(wav.readframes(wav.getnframes()), dtype="<i2").astype(np.float32) / 32768
+
+
 def model_path(model_key: str) -> Path:
     if model_key not in MODELS:
         raise ValueError("不支持的模型")
@@ -137,6 +184,7 @@ class SynthesisParams:
     sentence_chars: int = 40
     streaming_interval: float = 0.32
     stream: bool = False
+    speed: float = 1.0
 
 
 class TTSEngine:
@@ -218,7 +266,17 @@ class TTSEngine:
                 results = self._generate(model, p, sentence, p.stream)
                 if not p.stream:
                     for result in results:
-                        yield to_pcm16(trim_edge_silence(result.audio, sentence))
+                        trimmed = trim_edge_silence(result.audio, sentence)
+                        if p.speed != 1.0:
+                            # Keep the join pause intact; only the speech is
+                            # time-stretched, so the pause is re-appended after.
+                            pause = int(SAMPLE_RATE * sentence_pause_seconds(sentence))
+                            speech = trimmed[:-pause] if pause and len(trimmed) > pause else trimmed
+                            stretched = change_speed(speech, p.speed)
+                            trimmed = np.concatenate((
+                                stretched, np.zeros(pause, dtype=np.float32),
+                            ))
+                        yield to_pcm16(trimmed)
                 else:
                     # One-chunk lookahead lets us trim only the first and last
                     # chunks without cutting natural pauses inside the segment.
@@ -266,6 +324,7 @@ class TTSEngine:
             "sample_rate": SAMPLE_RATE, "params": db.dumps({
                 "instruct": p.instruct, "temperature": p.temperature, "top_k": p.top_k,
                 "top_p": p.top_p, "repetition_penalty": p.repetition_penalty,
+                "speed": p.speed,
             }), "created_at": db.now(),
         }
 
@@ -316,6 +375,7 @@ class TTSEngine:
                     max_tokens=params.get("max_tokens"),
                     sentence_chars=settings["sentence_chars"],
                     streaming_interval=settings["streaming_interval"],
+                    speed=params.get("speed", 1.0),
                 ), task_id)
                 db.add_artifact(result)
                 db.update_task(task_id, status="succeeded", artifact_id=result["id"],

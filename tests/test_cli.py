@@ -62,7 +62,7 @@ def test_say_writes_wav_and_reports_headers(monkeypatch, tmp_path):
     target = tmp_path / "out.wav"
     args = argparse.Namespace(
         base="http://x", json=True, autostart=True, text="你好", file=None,
-        voice="薇薇安", instruct=None, temperature=.7, out=str(target),
+        voice="薇薇安", instruct=None, temperature=.7, speed=1.0, out=str(target),
         format="wav", keep_wav=False, stream=False, play=False,
     )
     assert cli.cmd_say(args) == 0

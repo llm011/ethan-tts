@@ -75,9 +75,22 @@ def is_up(base: str | None = None) -> bool:
         return False
 
 
+def base_port(base: str) -> int:
+    return urllib.parse.urlsplit(base).port or 8765
+
+
+def is_local(base: str) -> bool:
+    host = urllib.parse.urlsplit(base).hostname or ""
+    return host in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+
+
 def ensure_server(base: str, autostart: bool) -> None:
     if is_up(base):
         return
+    if not is_local(base):
+        raise ApiError(
+            f"远端服务 {base} 不可达；本机无法为远端地址启动服务，请检查该服务是否运行。"
+        )
     if not autostart:
         raise ApiError(
             f"服务未运行（{base}）。先执行 `ethan-tts serve`，或加 --autostart。"
@@ -86,7 +99,7 @@ def ensure_server(base: str, autostart: bool) -> None:
     interpreter = str(python) if python.exists() else sys.executable
     log_dir = ROOT / "data" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    port = base.rsplit(":", 1)[-1]
+    port = str(base_port(base))
     with (log_dir / "server.log").open("ab") as log:
         subprocess.Popen(
             [interpreter, str(ROOT / "app.py"), "--host", "127.0.0.1", "--port", port],
@@ -196,7 +209,7 @@ def cmd_say(args: argparse.Namespace) -> int:
     voice_id = resolve_voice(args.voice, base)
     payload = {
         "text": text, "voice_id": voice_id, "instruct": args.instruct,
-        "temperature": args.temperature,
+        "temperature": args.temperature, "speed": args.speed,
     }
     target = Path(args.out or f"tts-{time.strftime('%Y%m%d-%H%M%S')}.wav").expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -401,7 +414,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 def cmd_stop(args: argparse.Namespace) -> int:
     import signal
-    pattern = f"app.py --host 127.0.0.1 --port {args.base.rsplit(':', 1)[-1]}"
+    pattern = f"app.py --host 127.0.0.1 --port {base_port(args.base)}"
     killed = 0
     result = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True)
     for pid in result.stdout.split():
@@ -437,6 +450,8 @@ def build_parser() -> argparse.ArgumentParser:
     say.add_argument("--voice", "-v", help="音色名称或 id，默认使用设置中的发音人")
     say.add_argument("--instruct", "-i", help="语气指令，例如：轻快一点")
     say.add_argument("--temperature", "-t", type=float, default=.7)
+    say.add_argument("--speed", "-s", type=float, default=1.0,
+                     help="语速倍率 0.5–2.0（保持音高，使用 ffmpeg atempo）")
     say.add_argument("--out", "-o", help="输出文件，默认 tts-<时间>.wav")
     say.add_argument("--format", choices=["wav", "mp3", "m4a"], default="wav")
     say.add_argument("--keep-wav", action="store_true", help="转码后保留原始 WAV")

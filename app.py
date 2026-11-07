@@ -52,6 +52,7 @@ class SynthesisRequest(BaseModel):
     max_tokens: int | None = Field(default=None, ge=50, le=4096)
     sentence_chars: int | None = Field(default=None, ge=20, le=200)
     streaming_interval: float | None = Field(default=None, ge=.16, le=2)
+    speed: float = Field(default=1.0, ge=.5, le=2.0)
 
     @field_validator("text")
     @classmethod
@@ -118,6 +119,7 @@ def synthesis_params(req: SynthesisRequest, speaker: dict) -> SynthesisParams:
         top_k=req.top_k, top_p=req.top_p, repetition_penalty=req.repetition_penalty,
         max_tokens=req.max_tokens, sentence_chars=req.sentence_chars or settings["sentence_chars"],
         streaming_interval=req.streaming_interval or settings["streaming_interval"],
+        speed=req.speed,
     )
 
 

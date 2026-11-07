@@ -130,6 +130,7 @@ $("synth-text").addEventListener("input", updateCount);
 $("clear-text").addEventListener("click", () => { $("synth-text").value = ""; updateCount(); $("synth-text").focus(); });
 $("example-btn").addEventListener("click", () => { $("synth-text").value = examples[exampleIndex++ % examples.length]; updateCount(); });
 $("temperature").addEventListener("input", () => $("temperature-value").textContent = $("temperature").value);
+$("speed").addEventListener("input", () => $("speed-value").textContent = `${Number($("speed").value).toFixed(2)}×`);
 
 function synthesisRequest() {
   const text = $("synth-text").value.trim();
@@ -139,10 +140,12 @@ function synthesisRequest() {
     text, voice_id: $("synth-voice").value, instruct: $("synth-instruct").value.trim() || null,
     temperature: Number($("temperature").value), repetition_penalty: Number($("repetition").value),
     top_k: Number($("top-k").value), top_p: Number($("top-p").value),
+    speed: Number($("speed").value),
   };
 }
 function validateAdvanced(req) {
   if (req.repetition_penalty < .8 || req.repetition_penalty > 2 || req.top_p <= 0 || req.top_p > 1 || req.top_k < 1 || req.top_k > 200) throw new Error("请检查高级参数的有效范围");
+  if (req.speed < .5 || req.speed > 2) throw new Error("语速需在 0.5×–2.0× 之间");
 }
 async function synthesize() {
   let req;
@@ -168,41 +171,123 @@ async function synthesize() {
   finally { setBusy("synth-btn", false); }
 }
 $("synth-btn").addEventListener("click", synthesize);
+
+// Streaming playback is driven by a small state machine so the user can pause
+// and resume without losing the audio that has already arrived.
+const streamPlayer = {
+  context: null, reader: null, controller: null, cursor: 0,
+  paused: false, active: false, done: false,
+  reset() {
+    this.paused = false; this.active = false; this.done = false;
+    this.cursor = 0; this.reader = null; this.controller = null;
+    if (this.context) { this.context.close().catch(() => {}); this.context = null; }
+  },
+  sync() {
+    $("pause-btn").hidden = !this.active;
+    $("stop-stream-btn").hidden = !this.active;
+    $("pause-btn").textContent = this.paused ? "▶ 继续" : "❚❚ 暂停";
+    $("stream-btn").disabled = this.active;
+  },
+  async pause() {
+    if (!this.context || !this.active) return;
+    this.paused = true;
+    await this.context.suspend();
+    $("result-status").textContent = "已暂停 · 音频继续在后台生成";
+    this.sync();
+  },
+  async resume() {
+    if (!this.context || !this.active) return;
+    this.paused = false;
+    // AudioContext.currentTime freezes while suspended, so scheduled buffers
+    // keep their relative timing and simply continue from where they stopped.
+    await this.context.resume();
+    $("result-status").textContent = this.done ? "播放中 · 未保存产物" : "播放中 · 正在继续生成";
+    this.sync();
+  },
+  stop() {
+    const wasActive = this.active;
+    this.controller?.abort();
+    this.reader?.cancel().catch(() => {});
+    this.reset();
+    this.sync();
+    if (wasActive) $("result-status").textContent = "已停止 · 未保存产物";
+  },
+};
+
 $("stream-btn").addEventListener("click", async () => {
   let req;
   try { req = synthesisRequest(); validateAdvanced(req); } catch (e) { return toast(e.message, true); }
-  setBusy("stream-btn", true, "连接中…"); $("result-status").textContent = "流式生成中，首段音频返回后开始播放…";
+  streamPlayer.stop();
+  streamPlayer.reset();
+  setBusy("stream-btn", true, "连接中…");
+  $("result-status").textContent = "流式生成中，首段音频返回后开始播放…";
+  const controller = new AbortController();
+  streamPlayer.controller = controller;
   try {
-    const response = await api("/api/tts/stream", {method:"POST",body:JSON.stringify(req)});
+    const response = await api("/api/tts/stream", {
+      method: "POST", body: JSON.stringify(req), signal: controller.signal,
+    });
     // WAV is not a supported MSE container in Chrome. Decode the known PCM16
     // stream with Web Audio instead, scheduling chunks as they arrive.
     const AudioContext = window.AudioContext || window.webkitAudioContext;
     if (!AudioContext) throw new Error("此浏览器不支持流式播放，请使用合成音频");
-    const context = new AudioContext({sampleRate:24000});
+    const context = new AudioContext({sampleRate: 24000});
     await context.resume();
+    Object.assign(streamPlayer, {
+      context, reader: response.body.getReader(),
+      cursor: context.currentTime + .08, active: true, done: false, paused: false,
+    });
     $("result-empty").hidden = true; $("result-content").hidden = false; $("result-metrics").hidden = true;
-    $("result-audio").style.display = "none"; $("result-title").textContent = req.text.slice(0,70); $("result-download").hidden = true;
-    const reader = response.body.getReader();
-    let header = new Uint8Array(0), cursor = context.currentTime + .08, received = 0;
+    $("result-audio").style.display = "none"; $("result-title").textContent = req.text.slice(0, 70);
+    $("result-download").hidden = true;
+    setBusy("stream-btn", false);
+    streamPlayer.sync();
+    $("result-status").textContent = "正在生成并播放 · 可随时暂停";
+
+    let header = new Uint8Array(0), received = 0;
     while (true) {
-      const {done,value} = await reader.read(); if (done) break;
-      const joined = new Uint8Array(header.length + value.length); joined.set(header); joined.set(value,header.length);
-      const start = received === 0 ? Math.min(44,joined.length) : 0;
-      const length = joined.length - start - ((joined.length-start)%2);
+      const {done, value} = await streamPlayer.reader.read();
+      if (done) break;
+      const joined = new Uint8Array(header.length + value.length);
+      joined.set(header); joined.set(value, header.length);
+      const start = received === 0 ? Math.min(44, joined.length) : 0;
+      const length = joined.length - start - ((joined.length - start) % 2);
       if (length > 0) {
-        const pcm = new Int16Array(joined.buffer,joined.byteOffset+start,length/2);
-        const floats = new Float32Array(pcm.length); for(let i=0;i<pcm.length;i++) floats[i]=pcm[i]/32768;
-        const audioBuffer = context.createBuffer(1,floats.length,24000); audioBuffer.copyToChannel(floats,0);
-        const source = context.createBufferSource(); source.buffer=audioBuffer; source.connect(context.destination);
-        source.start(Math.max(cursor,context.currentTime+.02)); cursor=Math.max(cursor,context.currentTime+.02)+audioBuffer.duration;
+        const pcm = new Int16Array(joined.buffer, joined.byteOffset + start, length / 2);
+        const floats = new Float32Array(pcm.length);
+        for (let i = 0; i < pcm.length; i++) floats[i] = pcm[i] / 32768;
+        const audioBuffer = context.createBuffer(1, floats.length, 24000);
+        audioBuffer.copyToChannel(floats, 0);
+        const source = context.createBufferSource();
+        source.buffer = audioBuffer; source.connect(context.destination);
+        const at = Math.max(streamPlayer.cursor, context.currentTime + .02);
+        source.start(at);
+        streamPlayer.cursor = at + audioBuffer.duration;
       }
-      header=joined.slice(start+length); received+=value.length;
+      header = joined.slice(start + length); received += value.length;
     }
-    $("result-status").textContent="流式生成完成，正在播放尾段 · 未保存产物";
-    setTimeout(()=>context.close(),Math.max(0,(cursor-context.currentTime+1)*1000));
-  } catch (e) { $("result-status").textContent = "流式试听失败，可尝试合成音频"; toast(e.message, true); }
-  finally { setBusy("stream-btn", false); $("result-download").hidden = false; }
+    streamPlayer.done = true;
+    $("result-status").textContent = "流式生成完成，正在播放尾段 · 未保存产物";
+    const remaining = Math.max(0, streamPlayer.cursor - context.currentTime);
+    setTimeout(() => {
+      if (streamPlayer.done) { streamPlayer.reset(); streamPlayer.sync(); }
+    }, (remaining + .8) * 1000);
+  } catch (e) {
+    if (e.name === "AbortError") return; // user pressed stop
+    $("result-status").textContent = "流式试听失败，可尝试合成音频";
+    toast(e.message, true);
+    streamPlayer.reset(); streamPlayer.sync();
+  } finally {
+    setBusy("stream-btn", false);
+    $("result-download").hidden = false;
+    streamPlayer.sync();
+  }
 });
+
+$("pause-btn").addEventListener("click", () => {
+  streamPlayer.paused ? streamPlayer.resume() : streamPlayer.pause();
+});
+$("stop-stream-btn").addEventListener("click", () => streamPlayer.stop());
 
 async function loadArtifacts() {
   try {

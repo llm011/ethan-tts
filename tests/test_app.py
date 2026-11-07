@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 import app as application
 import db
 from config import ARTIFACT_DIR, VOICE_DIR
-from engine import sentence_pause_seconds, split_sentences, to_pcm16, trim_edge_silence
+from engine import change_speed, sentence_pause_seconds, split_sentences, to_pcm16, trim_edge_silence
 
 
 @pytest.fixture()
@@ -54,6 +54,45 @@ def test_edge_trimming_removes_padding_but_keeps_inner_silence():
     assert np.count_nonzero(trimmed[-int(rate * .2):]) == 0
     assert sentence_pause_seconds("短停顿，") < sentence_pause_seconds("长停顿。")
     assert len(to_pcm16(trimmed)) == len(trimmed) * 2
+
+
+def test_speed_changes_tempo_and_keeps_pitch():
+    """Speed must be real: ffmpeg atempo shortens audio without pitch shift."""
+    import shutil
+    import numpy as np
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg required for tempo changes")
+    rate = 24000
+    t = np.arange(int(rate * 2.0)) / rate
+    tone = (.4 * np.sin(2 * np.pi * 300 * t)).astype(np.float32)
+    assert len(change_speed(tone, 1.0)) == len(tone)
+    faster = change_speed(tone, 1.5)
+    slower = change_speed(tone, 0.75)
+    assert len(faster) < len(tone) * .8
+    assert len(slower) > len(tone) * 1.2
+    # Dominant frequency must stay near 300 Hz: pitch is preserved.
+    spectrum = np.abs(np.fft.rfft(faster * np.hanning(len(faster))))
+    peak = np.argmax(spectrum) * rate / len(faster)
+    assert abs(peak - 300) < 25
+
+
+def test_speed_is_exposed_on_the_api(client, monkeypatch):
+    monkeypatch.setattr(application, "model_installed", lambda _: True)
+    captured = {}
+
+    def fake_generate(params, task_id):
+        captured["speed"] = params.speed
+        raise RuntimeError("stop after capturing")
+
+    monkeypatch.setattr(application.engine, "generate_file", fake_generate)
+    response = client.post("/api/tts", json={
+        "text": "语速测试。", "voice_id": "preset:Vivian", "speed": 1.25,
+    })
+    assert response.status_code == 500  # fake engine intentionally fails
+    assert captured["speed"] == 1.25
+    assert client.post("/api/tts", json={
+        "text": "越界。", "voice_id": "preset:Vivian", "speed": 3,
+    }).status_code == 422
 
 
 def test_health_voices_and_settings(client):
