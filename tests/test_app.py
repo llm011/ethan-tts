@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 import app as application
 import db
 from config import ARTIFACT_DIR, VOICE_DIR
-from engine import split_sentences, to_pcm16
+from engine import sentence_pause_seconds, split_sentences, to_pcm16, trim_edge_silence
 
 
 @pytest.fixture()
@@ -32,6 +32,28 @@ def test_split_sentences_preserves_punctuation():
     parts = split_sentences("你好。今天怎么样？很好！", max_len=40)
     assert parts == ["你好。", "今天怎么样？", "很好！"]
     assert all(len(part) <= 5 for part in split_sentences("一" * 12, max_len=5))
+
+
+def test_edge_trimming_removes_padding_but_keeps_inner_silence():
+    import numpy as np
+    rate = 24000
+    t = np.arange(int(rate * .2)) / rate
+    tone = (.5 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+    audio = np.concatenate([
+        np.zeros(int(rate * .3), dtype=np.float32), tone,
+        np.zeros(int(rate * .5), dtype=np.float32), tone,
+        np.zeros(int(rate * .3), dtype=np.float32),
+    ])
+    trimmed = trim_edge_silence(audio, "测试。")
+    assert len(trimmed) < len(audio) - int(rate * .25)
+    assert len(trimmed) > len(audio) - int(rate * .4)
+    # The 500 ms pause between spoken phrases must remain untouched.
+    inner_start = int(rate * .30)
+    inner_end = int(rate * .70)
+    assert np.count_nonzero(trimmed[inner_start:inner_end]) == 0
+    assert np.count_nonzero(trimmed[-int(rate * .2):]) == 0
+    assert sentence_pause_seconds("短停顿，") < sentence_pause_seconds("长停顿。")
+    assert len(to_pcm16(trimmed)) == len(trimmed) * 2
 
 
 def test_health_voices_and_settings(client):

@@ -40,10 +40,64 @@ def split_sentences(text: str, max_len: int = 40) -> list[str]:
     return out or [text.strip()]
 
 
-def to_pcm16(audio: mx.array) -> bytes:
-    # mlx.core.array does not implement NumPy's .tobytes() method.
-    pcm = (mx.clip(audio, -1.0, 1.0) * 32767).astype(mx.int16)
-    return np.asarray(pcm, dtype=np.int16).tobytes()
+def to_pcm16(audio: mx.array | np.ndarray) -> bytes:
+    # Convert through NumPy; mlx.core.array itself has no .tobytes() method.
+    samples = np.asarray(audio, dtype=np.float32)
+    pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype("<i2")
+    return pcm.tobytes()
+
+
+def sentence_pause_seconds(sentence: str) -> float:
+    """Natural join pause after removing the model's own edge padding."""
+    if sentence.endswith(("，", ",", "、", "：", ":")):
+        return .10
+    if sentence.endswith(("。", "！", "？", "!", "?")):
+        return .26
+    if sentence.endswith(("；", ";")):
+        return .20
+    return .12
+
+
+def trim_edge_silence(
+    audio: mx.array | np.ndarray,
+    sentence: str,
+    trim_start: bool = True,
+    trim_end: bool = True,
+) -> np.ndarray:
+    """Trim only generated edge padding, never silence inside speech.
+
+    Qwen3-TTS adds roughly 300 ms at both ends of every independent segment.
+    Concatenating segments otherwise produces an artificial 600 ms hole.
+    A short pre-roll protects quiet consonants; punctuation controls the join.
+    """
+    samples = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if not len(samples):
+        return samples
+    frame = max(1, int(SAMPLE_RATE * .01))
+    frame_count = (len(samples) + frame - 1) // frame
+    padded = np.pad(samples, (0, frame_count * frame - len(samples)))
+    rms = np.sqrt(np.mean(padded.reshape(frame_count, frame) ** 2, axis=1))
+    active = np.flatnonzero(rms >= 10 ** (-45 / 20))
+    if not len(active):
+        return np.zeros(int(SAMPLE_RATE * sentence_pause_seconds(sentence)), dtype=np.float32) if trim_end else samples[:0]
+
+    start = 0
+    end = len(samples)
+    if trim_start:
+        first_active = int(active[0] * frame)
+        start = max(0, first_active - int(SAMPLE_RATE * .03))
+    if trim_end:
+        last_active = min(len(samples), int((active[-1] + 1) * frame))
+        end = last_active
+    trimmed = samples[start:end].copy()
+    if trim_end:
+        # A tiny fade prevents clicks when the active frame ends non-zero.
+        fade = min(len(trimmed), int(SAMPLE_RATE * .005))
+        if fade:
+            trimmed[-fade:] *= np.linspace(1, 0, fade, dtype=np.float32)
+        pause = np.zeros(int(SAMPLE_RATE * sentence_pause_seconds(sentence)), dtype=np.float32)
+        trimmed = np.concatenate((trimmed, pause))
+    return trimmed
 
 
 def stream_wav_header() -> bytes:
@@ -161,8 +215,27 @@ class TTSEngine:
             for sentence in split_sentences(p.text, p.sentence_chars):
                 if cancelled and cancelled():
                     raise CancelledError("任务已取消")
-                for result in self._generate(model, p, sentence, p.stream):
-                    yield to_pcm16(result.audio)
+                results = self._generate(model, p, sentence, p.stream)
+                if not p.stream:
+                    for result in results:
+                        yield to_pcm16(trim_edge_silence(result.audio, sentence))
+                else:
+                    # One-chunk lookahead lets us trim only the first and last
+                    # chunks without cutting natural pauses inside the segment.
+                    pending: np.ndarray | None = None
+                    for result in results:
+                        if pending is None:
+                            first = trim_edge_silence(result.audio, sentence, trim_end=False)
+                            if not len(first):
+                                continue
+                            pending = first
+                            continue
+                        yield to_pcm16(pending)
+                        pending = np.asarray(result.audio, dtype=np.float32).reshape(-1)
+                    if pending is not None:
+                        yield to_pcm16(trim_edge_silence(
+                            pending, sentence, trim_start=False, trim_end=True,
+                        ))
                 if cancelled and cancelled():
                     raise CancelledError("任务已取消")
 

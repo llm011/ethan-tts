@@ -6,13 +6,14 @@
 
 ## 功能
 
-- **语音工作台**：中文长文本自动切句、预设音色、方言、语气指令、采样参数、完整 WAV 合成与边生成边播放。
+- **语音工作台**：中文长文本自动切句、预设音色、方言、语气指令、采样参数、完整 WAV 合成与边生成边播放。自动裁去各分句首尾重复的模型静音，仅保留按标点控制的拼接停顿，不削句中自然停顿。
 - **音色库**：9 个内置音色；收藏、搜索、编辑备注；自定义「文字设计声音」与「参考录音克隆」。
 - **音频产物**：本地持久化，在线试听、WAV 下载、按文本/音色搜索、删除与存储统计。
 - **任务队列**：后台任务状态、进度记录、取消、失败/中断重试。单任务串行，避免推理并发导致内存峰值叠加。
 - **运行日志**：按级别、模块、关键词与任务筛选，查看结构化错误和模型下载记录，可清空。
 - **设置与资源**：默认发音人、文本长度、切句长度、流式间隔、自动播放、模型按需下载、主动释放内存。
 - **API**：FastAPI 提供完整 HTTP 接口；启动后可打开 `http://127.0.0.1:8765/docs`。
+- **CLI**：面向 agent 与脚本的 `ethan-tts` 命令，支持合成、克隆、音色/产物/模型/日志管理，全部命令可输出 JSON。
 
 ## 实测性能
 
@@ -58,6 +59,65 @@ uv pip install --python .venv/bin/python -r requirements.txt
 ```bash
 HTTPS_PROXY=http://127.0.0.1:7890 .venv/bin/python download_model.py
 ```
+
+## 命令行（推荐给 agent 用）
+
+CLI 默认连到已常驻的服务，所以**不会重复加载模型**，热态下几秒就能返回。服务没开时它会自动在后台拉起并等待就绪，不需要你手动先启动。
+
+安装（独立工具环境，不污染系统 Python，也不占模型内存）：
+
+```bash
+cd /Volumes/SSDExt/code/life/ethan-tts
+uv tool install --python 3.12 --editable .
+# 之后任意目录都能直接用 ethan-tts
+```
+
+```bash
+# 最常用：合成一句话，存成 WAV
+ethan-tts say "你好，这是本地合成的语音。" -o hello.wav
+
+# 给 agent 用：JSON 输出 + 指定音色 + 立即播放
+ethan-tts say "今天先不急。" --voice 老凌的声音 --json --play
+
+# 长文本从文件读，导出 mp3
+ethan-tts say --file script.txt --format mp3 -o out.mp3
+
+# 管道输入
+echo "从标准输入来的文本。" | ethan-tts say - -o pipe.wav
+
+# 用参考录音克隆音色（逐字稿必须准确）
+ethan-tts clone --audio my.m4a --text "录音里说的原话" --name 我的声音
+
+# 用文字描述创建音色（需先下载 VoiceDesign 模型）
+ethan-tts design --name 深夜电台 --instruct "成熟温柔的女声，语速偏慢"
+
+# 管理与排查
+ethan-tts voices list --json
+ethan-tts artifacts list
+ethan-tts artifacts get <id> -o copy.wav
+ethan-tts models list
+ethan-tts logs --level ERROR
+ethan-tts status --json
+ethan-tts serve            # 后台启动服务
+ethan-tts stop             # 停止服务
+```
+
+`say --json` 返回示例，agent 可直接解析：
+
+```json
+{
+  "path": "/Users/me/hello.wav",
+  "artifact_id": "3c63a3b197b5",
+  "audio_seconds": 4.4,
+  "generation_seconds": 4.26,
+  "realtime_factor": 0.97,
+  "wall_seconds": 4.28
+}
+```
+
+约定：成功时退出码 `0`；参数或服务错误时退出码 `2`，并在 `--json` 模式下输出 `{"ok": false, "error": "..."}`。所有命令都支持 `--base` 指向远端实例、`--no-autostart` 禁止自动拉起服务。
+
+环境变量：`ETHAN_TTS_URL`（默认 `http://127.0.0.1:8765`）、`ETHAN_TTS_STARTUP_TIMEOUT`（自动启动等待秒数，默认 90）。
 
 ### 可选模型与三种玩法
 

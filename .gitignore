@@ -3,6 +3,9 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+*.egg-info/
+build/
+dist/
 .DS_Store
 
 # Model weights are downloaded separately; never commit them
