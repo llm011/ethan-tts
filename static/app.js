@@ -130,7 +130,11 @@ $("synth-text").addEventListener("input", updateCount);
 $("clear-text").addEventListener("click", () => { $("synth-text").value = ""; updateCount(); $("synth-text").focus(); });
 $("example-btn").addEventListener("click", () => { $("synth-text").value = examples[exampleIndex++ % examples.length]; updateCount(); });
 $("temperature").addEventListener("input", () => $("temperature-value").textContent = $("temperature").value);
-$("speed").addEventListener("input", () => $("speed-value").textContent = `${Number($("speed").value).toFixed(2)}×`);
+$("speed").addEventListener("input", () => {
+  const v = Number($("speed").value);
+  // Show 1× instead of 1.00×, but keep one decimal for non-integers.
+  $("speed-value").textContent = `${Number.isInteger(v) ? v : v.toFixed(2).replace(/0$/, "")}×`;
+});
 
 function synthesisRequest() {
   const text = $("synth-text").value.trim();
@@ -436,5 +440,17 @@ $("pron-preview-btn").addEventListener("click", async () => {
   finally { setBusy("pron-preview-btn", false); }
 });
 
-async function init(){try{state.settings=await api("/api/settings");applyTheme(localStorage.getItem("ethan-tts-theme")||state.settings.theme);await loadVoices();renderSettings();updateCount();await loadOverview();await loadPronunciations();navigate(location.hash.slice(1)||"studio");state.poll=setInterval(()=>{loadOverview();if(state.current==="tasks")loadTasks();if(state.current==="settings")loadModels();},5000);}catch(e){toast(`初始化失败：${e.message}`,true);}}
+async function init(){
+  // Switch the view first so the active tab and content match the URL
+  // immediately; data loading must not gate the initial paint.
+  applyTheme(localStorage.getItem("ethan-tts-theme")||"light");
+  navigate(location.hash.slice(1)||"studio");
+  try{
+    state.settings=await api("/api/settings");
+    applyTheme(localStorage.getItem("ethan-tts-theme")||state.settings.theme);
+    await loadVoices();renderSettings();updateCount();await loadOverview();await loadPronunciations();
+    navigate(state.current);
+    state.poll=setInterval(()=>{loadOverview();if(state.current==="tasks")loadTasks();if(state.current==="settings")loadModels();},5000);
+  }catch(e){toast(`初始化失败：${e.message}`,true);}
+}
 init();

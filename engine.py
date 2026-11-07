@@ -335,6 +335,22 @@ class TTSEngine:
                                 stretched, np.zeros(pause, dtype=np.float32),
                             ))
                         yield to_pcm16(trimmed)
+                elif p.speed != 1.0:
+                    # Tempo change needs the whole sentence, so buffer this
+                    # sentence and emit it at the requested speed. Earlier
+                    # sentences have already been streamed, so first-audio
+                    # latency stays roughly one sentence.
+                    buffer: list[np.ndarray] = []
+                    for result in results:
+                        buffer.append(np.asarray(result.audio, dtype=np.float32).reshape(-1))
+                    if buffer:
+                        joined = trim_edge_silence(np.concatenate(buffer), sentence)
+                        pause = int(SAMPLE_RATE * sentence_pause_seconds(sentence))
+                        speech = joined[:-pause] if pause and len(joined) > pause else joined
+                        stretched = change_speed(speech, p.speed)
+                        yield to_pcm16(np.concatenate((
+                            stretched, np.zeros(pause, dtype=np.float32),
+                        )))
                 else:
                     # One-chunk lookahead lets us trim only the first and last
                     # chunks without cutting natural pauses inside the segment.
