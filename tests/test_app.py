@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 import app as application
 import db
-from config import ARTIFACT_DIR
+from config import ARTIFACT_DIR, VOICE_DIR
 from engine import split_sentences, to_pcm16
 
 
@@ -108,6 +108,52 @@ def test_queue_cancel_retry_and_log_filter(client, monkeypatch):
     assert logs["total"] == 1
     assert logs["items"][0]["message"] == "测试错误"
     assert client.delete("/api/logs").json()["ok"] is True
+
+
+def test_m4a_reference_upload_uses_seekable_input(client):
+    """Regression: valid M4A through pipe:0 used to produce a 78-byte WAV."""
+    import shutil
+    import subprocess
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg is optional for the non-clone test suite")
+    source = TEST_DATA / "reference.m4a"
+    subprocess.run([
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+        "-i", "sine=frequency=440:duration=3.2", "-c:a", "aac", str(source),
+    ], check=True)
+    created = client.post("/api/voices", json={
+        "name": "M4A 上传测试", "kind": "clone", "reference_text": "测试录音",
+    })
+    voice_id = created.json()["id"]
+    with source.open("rb") as audio:
+        response = client.post(
+            f"/api/voices/{voice_id}/reference",
+            files={"file": ("voice.m4a", audio, "audio/mp4")},
+            data={"reference_text": "测试录音"},
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["reference_path"] is True
+    with wave.open(str(VOICE_DIR / f"{voice_id.removeprefix('voice:')}.wav")) as wav:
+        assert abs(wav.getnframes() / wav.getframerate() - 3.2) < .2
+        assert wav.getframerate() == 24000
+        assert wav.getnchannels() == 1
+
+
+def test_empty_reference_is_not_ready():
+    empty = VOICE_DIR / "empty-reference.wav"
+    with wave.open(str(empty), "wb") as wav:
+        wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(24000)
+        wav.writeframes(b"")
+    assert empty.stat().st_size < 100
+    assert db.reference_ready(empty.name) is False
+    # Regression: ffmpeg's non-seekable WAV header can claim audio that does
+    # not exist in the file. The real byte-size check must reject it too.
+    content = bytearray(empty.read_bytes())
+    content[40:44] = (240000).to_bytes(4, "little")
+    empty.write_bytes(content)
+    with wave.open(str(empty)) as wav:
+        assert wav.getnframes() >= 24000 * 3
+    assert db.reference_ready(empty.name) is False
 
 
 def test_path_traversal_and_missing_artifacts(client):

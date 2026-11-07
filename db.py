@@ -4,12 +4,13 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import wave
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from config import DB_PATH, DEFAULT_SETTINGS, PRESET_SPEAKERS
+from config import DB_PATH, DEFAULT_SETTINGS, MIN_REFERENCE_SECONDS, PRESET_SPEAKERS, SAMPLE_RATE, VOICE_DIR
 
 _write_lock = threading.RLock()
 
@@ -43,6 +44,22 @@ def connect() -> Iterator[sqlite3.Connection]:
 
 def row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
+
+
+def reference_ready(reference_path: str | None) -> bool:
+    """A WAV header alone is not a usable voice reference (78-byte empty file)."""
+    if not reference_path:
+        return False
+    try:
+        path = VOICE_DIR / reference_path
+        # Pipe-produced WAV headers may claim a huge data length even when the
+        # file contains no samples. Check the real bytes as well as the header.
+        if path.stat().st_size < SAMPLE_RATE * MIN_REFERENCE_SECONDS * 2:
+            return False
+        with wave.open(str(path), "rb") as wav:
+            return wav.getnframes() >= SAMPLE_RATE * MIN_REFERENCE_SECONDS
+    except (OSError, EOFError, wave.Error):
+        return False
 
 
 def init_db() -> None:
@@ -134,7 +151,7 @@ def voice(voice_id: str) -> dict | None:
     with connect() as db:
         item = row_dict(db.execute("SELECT * FROM voices WHERE id=?", (voice_id,)).fetchone())
     if item:
-        item["reference_path"] = bool(item["reference_path"])
+        item["reference_path"] = reference_ready(item["reference_path"])
     return item
 
 

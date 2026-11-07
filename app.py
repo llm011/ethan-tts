@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import uuid
+import wave
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -18,8 +19,8 @@ from pydantic import BaseModel, Field, field_validator
 
 import db
 from config import (
-    ARTIFACT_DIR, DEFAULT_MODEL, DEFAULT_SETTINGS, MAX_REFERENCE_BYTES, MODELS,
-    ROOT, VOICE_DIR,
+    ARTIFACT_DIR, DEFAULT_MODEL, DEFAULT_SETTINGS, MAX_REFERENCE_BYTES,
+    MIN_REFERENCE_SECONDS, MODELS, ROOT, VOICE_DIR,
 )
 from engine import CancelledError, SynthesisParams, engine, model_installed, stream_wav_header
 
@@ -96,8 +97,8 @@ def ensure_voice(voice_id: str) -> dict:
     speaker = db.voice_for_engine(voice_id)
     if not speaker:
         raise HTTPException(404, "音色不存在")
-    if speaker["kind"] == "clone" and not speaker["reference_path"]:
-        raise HTTPException(400, "请先上传该音色的参考录音")
+    if speaker["kind"] == "clone" and not db.reference_ready(speaker["reference_path"]):
+        raise HTTPException(400, f"参考录音为空或不足 {MIN_REFERENCE_SECONDS} 秒，请编辑音色并重新上传 10–20 秒的有效录音")
     if speaker["kind"] == "design" and not speaker["instruct"]:
         raise HTTPException(400, "请先填写声音描述")
     return speaker
@@ -159,7 +160,7 @@ def list_voices(kind: str | None = None, q: str = "", favorite: bool = False) ->
     items = []
     for row in rows:
         item = dict(row)
-        item["reference_path"] = bool(item["reference_path"])
+        item["reference_path"] = db.reference_ready(item["reference_path"])
         items.append(item)
     return {"items": items}
 
@@ -199,16 +200,35 @@ async def upload_reference(
     if len(content) < 100:
         raise HTTPException(400, "音频文件为空或损坏")
     filename = f"{voice_id.removeprefix('voice:')}.wav"
+    source_path = VOICE_DIR / f".upload-{uuid.uuid4().hex}{suffix}"
+    converted_path = VOICE_DIR / f".converted-{uuid.uuid4().hex}.wav"
+    source_path.write_bytes(content)
     import subprocess
-    process = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", "pipe:0",
-         "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", "-f", "wav", "pipe:1"],
-        input=content, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
-    )
-    if process.returncode or not process.stdout:
-        raise HTTPException(400, "无法解码音频，请换一段有效录音")
-    old = speaker["reference_path"]
-    (VOICE_DIR / filename).write_bytes(process.stdout)
+    try:
+        # M4A/MP4 may have a moov atom that requires seeking. Feeding bytes
+        # through pipe:0 can make ffmpeg exit 0 while producing an empty WAV.
+        process = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source_path),
+             "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", str(converted_path)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
+        )
+        if process.returncode or not converted_path.is_file():
+            db.log("ERROR", "voice", "参考录音解码失败", metadata={"stderr": process.stderr.decode(errors="replace")[-800:]})
+            raise HTTPException(400, "无法解码音频，请换一段有效录音")
+        try:
+            with wave.open(str(converted_path), "rb") as wav:
+                duration = wav.getnframes() / wav.getframerate()
+        except (EOFError, wave.Error) as exc:
+            raise HTTPException(400, "转码后的音频无效，请重新上传") from exc
+        if duration < MIN_REFERENCE_SECONDS:
+            raise HTTPException(
+                400,
+                f"有效录音只有 {duration:.1f} 秒，至少需要 {MIN_REFERENCE_SECONDS} 秒；请上传 10–20 秒清晰人声",
+            )
+        converted_path.replace(VOICE_DIR / filename)
+    finally:
+        source_path.unlink(missing_ok=True)
+        converted_path.unlink(missing_ok=True)
     with db.connect() as conn:
         conn.execute("UPDATE voices SET reference_path=?,reference_text=?,updated_at=? WHERE id=?",
                      (filename, reference_text.strip(), db.now(), voice_id))

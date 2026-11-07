@@ -1,6 +1,6 @@
 "use strict";
 const $ = id => document.getElementById(id);
-const state = { voices: [], settings: {}, artifacts: [], tasks: [], logs: [], current: "studio", lastArtifact: null, poll: null };
+const state = { voices: [], models: [], settings: {}, artifacts: [], tasks: [], logs: [], current: "studio", lastArtifact: null, poll: null };
 const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmt = (n, digits=2) => Number(n || 0).toFixed(digits);
 const formatBytes = n => n < 1024 ? `${n} B` : n < 1048576 ? `${fmt(n/1024,1)} KB` : n < 1073741824 ? `${fmt(n/1048576,1)} MB` : `${fmt(n/1073741824,2)} GB`;
@@ -59,8 +59,8 @@ async function loadOverview() {
     $("task-badge").hidden = !(data.tasks.queued || data.tasks.running);
     $("task-badge").textContent = (data.tasks.queued || 0) + (data.tasks.running || 0);
     $("storage-note").textContent = `${data.artifacts} 个音频 · ${formatBytes(data.storage_bytes)} · 共 ${fmt(data.audio_seconds/60,1)} 分钟`;
-    const defaultModel = data.models.find(m => m.key === "custom-0.6b-4bit");
-    $("model-hint").textContent = defaultModel?.installed ? "模型已就绪，首次合成自动加载" : "默认模型未下载，请先在设置中下载";
+    state.models = data.models;
+    updateSelectedVoice();
   } catch (e) { console.error(e); }
 }
 
@@ -76,7 +76,8 @@ async function loadVoices() {
       <button class="favorite ${v.is_favorite ? "active" : ""}" data-favorite="${esc(v.id)}" title="收藏">${v.is_favorite ? "★" : "☆"}</button>
       <div class="voice-card-top"><div class="avatar">${esc(v.name.slice(0,1))}</div><div><div class="voice-card-name">${esc(v.name)}${v.dialect ? '<span class="voice-tag">方言</span>' : ""}</div><div class="voice-card-sub">${esc(v.speaker || (v.kind === "design" ? "VoiceDesign" : "Voice Clone"))}</div></div></div>
       <div class="voice-card-desc">${esc(v.description || v.instruct || "暂无描述")}</div>
-      <div class="voice-card-foot"><span class="tag">${kindNames[v.kind] || v.kind}${v.kind === "clone" && v.reference_path ? " · 已上传录音" : ""}</span><div class="card-actions"><button class="text-button" data-use-voice="${esc(v.id)}">使用</button><button class="text-button" data-edit-voice="${esc(v.id)}">编辑</button></div></div>
+      ${voiceReadiness(v)}
+      <div class="voice-card-foot"><span class="tag">${kindNames[v.kind] || v.kind}${v.kind === "clone" && v.reference_path ? " · 录音已保存" : ""}</span><div class="card-actions"><button class="text-button" data-use-voice="${esc(v.id)}">使用</button><button class="text-button" data-edit-voice="${esc(v.id)}">编辑</button></div></div>
     </article>`).join("") : empty("没有找到匹配的音色", "◉");
   } catch (e) { toast(e.message, true); }
 }
@@ -88,10 +89,31 @@ function renderVoiceOptions() {
   $("setting-voice").value = state.settings.default_voice_id;
   updateSelectedVoice();
 }
+function requiredModel(voice) {
+  const key = {custom:"custom-0.6b-4bit",design:"design-1.7b-4bit",clone:"base-0.6b-4bit"}[voice?.kind];
+  return state.models.find(m => m.key === key);
+}
+function voiceReadiness(v) {
+  if (v.kind === "custom") return "";
+  const model = requiredModel(v);
+  const saved = v.kind === "clone" ? (v.reference_path ? "录音已保存" : "待上传有效录音") : "描述已保存";
+  const ready = model?.installed && (v.kind !== "clone" || v.reference_path);
+  const next = !model?.installed ? "还需下载 " + (v.kind === "clone" ? "Base 克隆模型" : "VoiceDesign 模型") : v.kind === "clone" && !v.reference_path ? "请重新上传有效录音" : "模型已就绪，无需训练";
+  return `<div class="voice-readiness ${ready ? "ready" : "pending"}">${saved} · ${next}</div>`;
+}
 function updateSelectedVoice() {
   const v = state.voices.find(v => v.id === $("synth-voice").value);
-  $("selected-voice-info").innerHTML = v ? `<strong>${esc(v.description || v.name)}</strong>${v.kind !== "custom" ? `<span class="voice-tag">需下载${v.kind === "design" ? "设计" : "克隆"}模型</span>` : ""}` : "";
+  const model = requiredModel(v);
+  $("selected-voice-info").innerHTML = v ? `<strong>${esc(v.description || v.name)}</strong>${voiceReadiness(v)}` : "";
   $("synth-instruct").placeholder = v?.kind === "design" ? (v.instruct || "声音设计指令") : "例如：轻快一点，带些笑意";
+  const missing = v && model && !model.installed;
+  $("required-model-btn").hidden = !missing;
+  if (missing) $("required-model-btn").dataset.modelKey = model.key;
+  $("model-hint").textContent = !v ? "请选择发音人" : missing ?
+    `${v.kind === "clone" ? "录音已保存（无需训练）" : "声音描述已保存"}；还需下载对应模型` :
+    v.kind === "clone" && !v.reference_path ? "请编辑音色重新上传有效录音；Base 模型已就绪" :
+    v.kind === "clone" ? "Base 模型与有效录音已就绪；合成时现场提取音色，无需训练" :
+    v.kind === "design" ? "VoiceDesign 模型已就绪；按描述现场生成声音" : "CustomVoice 模型已就绪，首次合成自动加载";
 }
 $("synth-voice").addEventListener("change", updateSelectedVoice);
 $("voice-search").addEventListener("input", () => { clearTimeout(state.searchTimer); state.searchTimer = setTimeout(loadVoices, 250); });
@@ -224,8 +246,10 @@ $("clear-logs").addEventListener("click",async()=>{if(confirm("确定清空全�
 
 function renderSettings(){const s=state.settings;if(!s.max_chars)return;$("setting-voice").value=s.default_voice_id;$("setting-chars").value=s.max_chars;$("setting-sentence").value=s.sentence_chars;$("setting-interval").value=s.streaming_interval;$("setting-autoplay").checked=s.autoplay;$("char-max").textContent=s.max_chars;$("synth-text").maxLength=s.max_chars;}
 $("save-settings").addEventListener("click",async()=>{setBusy("save-settings",true);try{state.settings=await api("/api/settings",{method:"PATCH",body:JSON.stringify({default_voice_id:$("setting-voice").value,max_chars:Number($("setting-chars").value),sentence_chars:Number($("setting-sentence").value),streaming_interval:Number($("setting-interval").value),autoplay:$("setting-autoplay").checked})});renderSettings();$("settings-status").textContent="设置已保存";toast("设置已保存");}catch(e){toast(e.message,true);}finally{setBusy("save-settings",false);}});
-async function loadModels(){try{const data=await api("/api/models");$("model-list").innerHTML=data.items.map(m=>`<div class="model-item"><div class="model-item-title"><span>${esc(m.name)}</span><span class="tag ${m.installed?"installed":""}">${m.loaded?"运行中":m.installed?"已下载":"未下载"}</span></div><p>${esc(m.description)}</p>${m.installed?"":`<button class="button secondary" data-download-model="${m.key}">下载模型 ↗</button>`}</div>`).join("");}catch(e){toast(e.message,true);}}
-$("model-list").addEventListener("click",async e=>{const b=e.target.closest("[data-download-model]");if(!b)return;b.disabled=true;try{const r=await api("/api/models/download",{method:"POST",body:JSON.stringify({model_key:b.dataset.downloadModel})});toast(r.message);navigate("logs");}catch(e){toast(e.message,true);b.disabled=false;}});
+async function loadModels(){try{const data=await api("/api/models");state.models=data.items;updateSelectedVoice();$("model-list").innerHTML=data.items.map(m=>`<div class="model-item"><div class="model-item-title"><span>${esc(m.name)}</span><span class="tag ${m.installed?"installed":""}">${m.loaded?"运行中":m.installed?"已下载":"未下载"}</span></div><p>${esc(m.description)}</p>${m.installed?"":`<button class="button secondary" data-download-model="${m.key}">下载模型 ↗</button>`}</div>`).join("");}catch(e){toast(e.message,true);}}
+async function startModelDownload(key,button,showLogs=false){button.disabled=true;const old=button.textContent;button.textContent="下载中…";try{const r=await api("/api/models/download",{method:"POST",body:JSON.stringify({model_key:key})});toast(r.message);if(showLogs)navigate("logs");}catch(e){toast(e.message,true);button.disabled=false;button.textContent=old;}}
+$("model-list").addEventListener("click",e=>{const b=e.target.closest("[data-download-model]");if(b)startModelDownload(b.dataset.downloadModel,b,true);});
+$("required-model-btn").addEventListener("click",e=>startModelDownload(e.currentTarget.dataset.modelKey,e.currentTarget));
 $("unload-models").addEventListener("click",async()=>{if(!confirm("释放模型内存？下次合成会重新加载模型。"))return;try{await api("/api/models/unload",{method:"POST"});toast("模型内存已释放");loadModels();loadOverview();}catch(e){toast(e.message,true);}});
 
 function openVoiceModal(voice=null){$("voice-modal").hidden=false;$("voice-form").reset();$("voice-form-error").hidden=true;$("edit-voice-id").value=voice?.id||"";$("voice-modal-title").textContent=voice?(voice.is_preset?"内置音色":"编辑音色"):"新建音色";$("new-voice-type").hidden=!!voice;$("voice-name").value=voice?.name||"";$("voice-description").value=voice?.description||"";$("voice-instruct").value=voice?.instruct||"";$("voice-reference-text").value=voice?.reference_text||"";$("clone-fields").hidden=voice?voice.kind!=="clone":true;$("design-fields").hidden=voice?voice.kind!=="design":false;$("voice-reference").required=!voice&&false;$("voice-name").disabled=!!voice?.is_preset;$("voice-description").disabled=!!voice?.is_preset;$("voice-instruct").disabled=!!voice?.is_preset;$("voice-reference-text").disabled=!!voice?.is_preset;$("save-voice").textContent=voice?.is_preset?"关闭":"保存音色";$("delete-voice").hidden=!voice||!!voice.is_preset;}
@@ -235,8 +259,11 @@ $("delete-voice").addEventListener("click",async()=>{const id=$("edit-voice-id")
 document.querySelectorAll('input[name="voice-type"]').forEach(el=>el.addEventListener("change",()=>{const clone=document.querySelector('input[name="voice-type"]:checked').value==="clone";$("clone-fields").hidden=!clone;$("design-fields").hidden=clone;}));
 $("voice-form").addEventListener("submit",async e=>{e.preventDefault();const id=$("edit-voice-id").value,existing=state.voices.find(v=>v.id===id);if(existing?.is_preset)return closeVoiceModal();setBusy("save-voice",true);$("voice-form-error").hidden=true;
   try{let voice;if(id){voice=await api(`/api/voices/${id}`,{method:"PATCH",body:JSON.stringify({name:$("voice-name").value,description:$("voice-description").value,instruct:$("voice-instruct").value||null,reference_text:$("voice-reference-text").value||null})});}else{const kind=document.querySelector('input[name="voice-type"]:checked').value;voice=await api("/api/voices",{method:"POST",body:JSON.stringify({name:$("voice-name").value,kind,description:$("voice-description").value,instruct:$("voice-instruct").value||null,reference_text:$("voice-reference-text").value||null})});}
-    const file=$("voice-reference").files[0];if(file){const form=new FormData();form.append("file",file);form.append("reference_text",$("voice-reference-text").value);await api(`/api/voices/${voice.id}/reference`,{method:"POST",body:form});}else if(voice.kind==="clone"&&!voice.reference_path)throw new Error("音色已创建，请编辑该音色并上传参考录音后再使用");
-    closeVoiceModal();toast("音色已保存");await loadVoices();
+    $("edit-voice-id").value=voice.id;
+    const file=$("voice-reference").files[0];if(file){const form=new FormData();form.append("file",file);form.append("reference_text",$("voice-reference-text").value);await api(`/api/voices/${voice.id}/reference`,{method:"POST",body:form});}else if(voice.kind==="clone"&&!voice.reference_path)throw new Error("音色已创建，请上传参考录音后再使用");
+    closeVoiceModal();await loadVoices();await loadOverview();
+    if(voice.kind!=="custom"){navigate("studio");$("synth-voice").value=voice.id;updateSelectedVoice();}
+    const model=requiredModel(voice);toast(voice.kind!=="custom"&&model&&!model.installed?"音色信息已保存；还需下载对应模型才能合成":"音色已保存，可以开始合成");
   }catch(e){$("voice-form-error").textContent=e.message;$("voice-form-error").hidden=false;}finally{setBusy("save-voice",false);}
 });
 

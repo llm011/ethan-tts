@@ -56,7 +56,7 @@
             </div></details>
           </div>
         </div>
-        <div class="synthesis-bar"><div class="synthesis-hint"><span class="dot"></span><span id="model-hint">模型已就绪，首次合成自动加载</span></div><div class="synthesis-actions"><button class="button secondary" id="stream-btn">▶ 流式试听</button><button class="button primary" id="synth-btn">✦ 合成音频 <span>↗</span></button></div></div>
+        <div class="synthesis-bar"><div class="synthesis-hint"><span class="dot"></span><span id="model-hint">模型已就绪，首次合成自动加载</span></div><div class="synthesis-actions"><button class="button secondary" id="required-model-btn" hidden>↓ 下载所需模型</button><button class="button secondary" id="stream-btn">▶ 流式试听</button><button class="button primary" id="synth-btn">✦ 合成音频 <span>↗</span></button></div></div>
         <div class="panel result-panel" id="result-panel">
           <div class="panel-head"><span class="panel-title">最近合成</span><span class="muted" id="result-status">等待你的第一次创作</span></div>
           <div class="empty compact" id="result-empty"><span class="empty-icon">♪</span><p>生成的音频会出现在这里，也会自动存入音频产物。</p></div>
@@ -115,7 +115,7 @@
   <div class="form-group" id="new-voice-type"><label>创建方式</label><div class="type-options"><label><input type="radio" name="voice-type" value="design" checked><span><b>✦ 文字设计</b><small>用一句话描述声音</small></span></label><label><input type="radio" name="voice-type" value="clone"><span><b>◉ 声音克隆</b><small>上传一段参考录音</small></span></label></div></div>
   <div class="form-group"><label>声音描述 / 备注</label><input class="input" id="voice-description" maxlength="300" placeholder="便于在音色库中识别"></div>
   <div class="form-group" id="design-fields"><label>设计指令 <span>必填</span></label><textarea class="input" id="voice-instruct" placeholder="例如：成熟温柔的女声，语速适中，像深夜电台主持人"></textarea><p class="form-hint">使用 1.7B VoiceDesign 模型，需要单独下载。</p></div>
-  <div class="form-group" id="clone-fields" hidden><label>参考录音</label><input type="file" id="voice-reference" accept=".wav,.mp3,.m4a,.flac,.ogg" class="input"><p class="form-hint">建议 10–20 秒、单人、无背景噪音，最大 20 MB。请确保已获得本人同意。</p><label>参考音频逐字稿 <span>必填</span></label><textarea class="input" id="voice-reference-text" placeholder="准确输入录音中说的内容"></textarea><p class="form-hint">使用 0.6B Base 模型，需要单独下载。</p></div>
+  <div class="form-group" id="clone-fields" hidden><label>参考录音</label><input type="file" id="voice-reference" accept=".wav,.mp3,.m4a,.flac,.ogg" class="input"><p class="form-hint">建议 10–20 秒、单人、无背景噪音，最大 20 MB。请确保已获得本人同意。</p><label>参考音频逐字稿 <span>必填</span></label><textarea class="input" id="voice-reference-text" placeholder="准确输入录音中说的内容"></textarea><p class="form-hint">保存时只做本地转码，不上传云端、不训练。首次合成由 0.6B Base 模型零样本提取音色；该模型与预设音色模型不同，需要单独下载。</p></div>
   <div class="modal-error" id="voice-form-error" hidden></div><div class="modal-actions"><button type="button" class="button secondary danger-text" id="delete-voice" hidden>删除</button><button type="button" class="button secondary" id="cancel-voice">取消</button><button type="submit" class="button primary" id="save-voice">保存音色</button></div>
 </form></div></div>
 <div id="toast-container" aria-live="polite"></div>
