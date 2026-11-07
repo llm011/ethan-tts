@@ -510,9 +510,16 @@ def list_pronunciations() -> dict:
 
 @app.post("/api/pronunciations", status_code=201)
 def create_pronunciation(req: PronunciationCreate) -> dict:
-    existing = {r["term"].lower() for r in db.list_pronunciations()}
-    if req.term.lower() in existing:
-        raise HTTPException(400, f"已存在「{req.term}」的替换规则，请直接修改")
+    # Case-sensitive rules may coexist with a case-insensitive one, because
+    # that is exactly what match_case is for: Qwen -> 千问 plus qwen -> other.
+    existing = db.list_pronunciations()
+    for rule in existing:
+        same_term = rule["term"] == req.term or (
+            not rule["match_case"] and not req.match_case
+            and rule["term"].lower() == req.term.lower()
+        )
+        if same_term:
+            raise HTTPException(400, f"已存在「{req.term}」的替换规则，请直接修改")
     item = db.create_pronunciation(
         req.term, req.say_as, req.note, req.match_case, req.is_enabled,
     )

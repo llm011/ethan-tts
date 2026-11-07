@@ -36,7 +36,9 @@ def apply_pronunciations(text: str, rules: list[dict]) -> tuple[str, list[str]]:
         return text, []
     ordered = sorted(
         (r for r in rules if r.get("is_enabled", 1) and r.get("term")),
-        key=lambda r: len(r["term"]), reverse=True,
+        # Longest first; on a tie, the case-sensitive rule is the more specific
+        # one, so "qwen" (exact) wins over "Qwen" (any case).
+        key=lambda r: (len(r["term"]), int(bool(r.get("match_case")))), reverse=True,
     )
     if not ordered:
         return text, []
@@ -53,11 +55,13 @@ def apply_pronunciations(text: str, rules: list[dict]) -> tuple[str, list[str]]:
             if not haystack.startswith(needle, index):
                 continue
             # Latin terms must not match inside a longer word: "Qwen" should not
-            # fire on "QwenTTS" unless the rule itself says QwenTTS.
+            # fire on "QwenTTS" unless the rule itself says QwenTTS. Digits are
+            # allowed after the term, because "Qwen3-TTS" is the common spelling
+            # and users expect the plain "Qwen" rule to cover it.
             if re.match(r"[A-Za-z0-9]", term[0]):
                 before = text[index - 1] if index else ""
                 after = text[index + len(term)] if index + len(term) < len(text) else ""
-                if re.match(r"[A-Za-z0-9]", before) or re.match(r"[A-Za-z0-9]", after):
+                if re.match(r"[A-Za-z0-9]", before) or re.match(r"[A-Za-z]", after):
                     continue
             matched = rule
             break

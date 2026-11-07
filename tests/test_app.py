@@ -239,7 +239,10 @@ def test_pronunciation_respects_word_boundaries():
     from engine import apply_pronunciations
     rules = [{"id": "a", "term": "Qwen", "say_as": "千问", "is_enabled": 1, "match_case": 0}]
     assert apply_pronunciations("QwenTTS", rules)[0] == "QwenTTS"
-    assert apply_pronunciations("Qwen3", rules)[0] == "Qwen3"
+    # Digits after the term are allowed: Qwen3 / Qwen3-TTS are the common
+    # spellings and must still hit the plain "Qwen" rule.
+    assert apply_pronunciations("Qwen3", rules)[0] == "千问3"
+    assert apply_pronunciations("Qwen3-TTS", rules)[0] == "千问3-TTS"
     assert apply_pronunciations("用 Qwen 做语音", rules)[0] == "用 千问 做语音"
 
 
@@ -271,9 +274,24 @@ def test_pronunciation_api_crud_and_preview(client):
     }).status_code == 400
     preview = client.post("/api/pronunciations/preview", json={"text": "Qwen3-TTS 用 Qwen"})
     assert preview.status_code == 200
-    assert preview.json()["spoken"] == "Qwen3-TTS 用 千问"
+    assert preview.json()["spoken"] == "千问3-TTS 用 千问"
     assert preview.json()["changed"] is True
     assert client.patch(f"/api/pronunciations/{pron_id}", json={"is_enabled": False}).json()["is_enabled"] == 0
     assert client.post("/api/pronunciations/preview", json={"text": "Qwen"}).json()["spoken"] == "Qwen"
     assert client.delete(f"/api/pronunciations/{pron_id}").json()["ok"] is True
     assert client.delete(f"/api/pronunciations/{pron_id}").status_code == 404
+
+
+def test_pronunciation_case_variants_can_coexist(client):
+    """A case-insensitive rule and a case-sensitive variant are not duplicates."""
+    base = client.post("/api/pronunciations", json={"term": "Qwen", "say_as": "千问"})
+    assert base.status_code == 201
+    variant = client.post("/api/pronunciations", json={
+        "term": "qwen", "say_as": "小写读法", "match_case": True,
+    })
+    assert variant.status_code == 201
+    preview = client.post("/api/pronunciations/preview", json={"text": "Qwen 和 qwen"})
+    assert preview.json()["spoken"] == "千问 和 小写读法"
+    assert client.post("/api/pronunciations", json={
+        "term": "QWEN", "say_as": "重复",
+    }).status_code == 400
