@@ -106,6 +106,22 @@
           <div class="setting-row"><div><strong>合成后自动播放</strong><p>保存完整 WAV 后立即播放</p></div><label class="switch"><input type="checkbox" id="setting-autoplay"><span></span></label></div>
           <div class="settings-actions"><span class="muted" id="settings-status"></span><button class="button primary" id="save-settings">保存设置</button></div>
         </div><div class="panel settings-panel"><h2>模型与资源</h2><p class="panel-description">默认仅加载 4bit 模型。可选模型不会自动下载。</p><div id="model-list"></div><button class="button secondary full" id="unload-models">释放模型内存</button><div class="resource-note">单任务队列 · 按需加载 · Metal 加速<br>停止服务后不会残留后台推理进程。</div></div></div>
+        <div class="panel settings-panel pronunciation-panel"><h2>读音纠正</h2><p class="panel-description">把模型容易读错的词换成你想要的读法，例如把 <code>Qwen</code> 读成「千问」。只改变合成时的发音，产物里仍保留原文。</p>
+          <form id="pron-form" class="pron-form">
+            <div class="pron-field"><label>原文 <span>必填</span></label><input class="input" id="pron-term" required maxlength="60" placeholder="Qwen"></div>
+            <div class="pron-arrow">→</div>
+            <div class="pron-field"><label>读作 <span>必填</span></label><input class="input" id="pron-say" required maxlength="120" placeholder="千问"></div>
+            <div class="pron-field"><label>备注 <span>可选</span></label><input class="input" id="pron-note" maxlength="200" placeholder="用于区分同类规则"></div>
+            <button class="button primary" type="submit" id="pron-add">＋ 添加</button>
+          </form>
+          <div class="pron-options"><label class="check"><input type="checkbox" id="pron-case"> 区分大小写</label><span class="muted">不勾选时 Qwen / qwen / QWEN 都会命中</span></div>
+          <div id="pron-list" class="pron-list"></div>
+          <div class="pron-preview">
+            <label class="field-label" for="pron-test">试一下效果 <span>不会真正合成</span></label>
+            <div class="pron-preview-row"><input class="input" id="pron-test" placeholder="输入一段包含 Qwen 的文本"><button class="button secondary" id="pron-preview-btn">预览</button></div>
+            <div class="pron-result" id="pron-result" hidden></div>
+          </div>
+        </div>
       </section>
     </div>
   </main>

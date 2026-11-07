@@ -7,7 +7,7 @@ import threading
 import time
 import uuid
 import wave
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Iterator
@@ -20,6 +20,59 @@ from config import ARTIFACT_DIR, DEFAULT_MODEL, MODEL_DIR, MODELS, SAMPLE_RATE, 
 
 _SPLIT_RE = re.compile(r"(?<=[。！？；!?;\n])")
 _CANCEL_CHECK = re.compile(r"[^a-zA-Z0-9_-]")
+_CJK = r"\u4e00-\u9fff"
+
+
+def apply_pronunciations(text: str, rules: list[dict]) -> tuple[str, list[str]]:
+    """Rewrite terms the model mispronounces, e.g. Qwen -> 千问.
+
+    Rules are applied longest-term-first in a single left-to-right pass, so a
+    replacement's output is never re-scanned by a later rule (no chains like
+    Qwen -> 千问 -> 千问千问). Latin terms only match at word boundaries, which
+    keeps "Qwen3" intact when the rule is plain "Qwen"... unless the term is
+    itself followed by digits, in which case it matches exactly as written.
+    """
+    if not text or not rules:
+        return text, []
+    ordered = sorted(
+        (r for r in rules if r.get("is_enabled", 1) and r.get("term")),
+        # Longest first; on a tie, the case-sensitive rule is the more specific
+        # one, so "qwen" (exact) wins over "Qwen" (any case).
+        key=lambda r: (len(r["term"]), int(bool(r.get("match_case")))), reverse=True,
+    )
+    if not ordered:
+        return text, []
+    parts: list[str] = []
+    used: list[str] = []
+    index = 0
+    lowered = text.lower()
+    while index < len(text):
+        matched = None
+        for rule in ordered:
+            term = rule["term"]
+            haystack = text if rule.get("match_case") else lowered
+            needle = term if rule.get("match_case") else term.lower()
+            if not haystack.startswith(needle, index):
+                continue
+            # Latin terms must not match inside a longer word: "Qwen" should not
+            # fire on "QwenTTS" unless the rule itself says QwenTTS. Digits are
+            # allowed after the term, because "Qwen3-TTS" is the common spelling
+            # and users expect the plain "Qwen" rule to cover it.
+            if re.match(r"[A-Za-z0-9]", term[0]):
+                before = text[index - 1] if index else ""
+                after = text[index + len(term)] if index + len(term) < len(text) else ""
+                if re.match(r"[A-Za-z0-9]", before) or re.match(r"[A-Za-z]", after):
+                    continue
+            matched = rule
+            break
+        if matched:
+            parts.append(matched["say_as"])
+            used.append(matched["id"])
+            index += len(matched["term"])
+        else:
+            parts.append(text[index])
+            index += 1
+    return "".join(parts), used
 
 
 def split_sentences(text: str, max_len: int = 40) -> list[str]:
@@ -185,6 +238,11 @@ class SynthesisParams:
     streaming_interval: float = 0.32
     stream: bool = False
     speed: float = 1.0
+    spoken_text: str | None = None
+    pronunciation_ids: list[str] = field(default_factory=list)
+
+    def speakable_text(self) -> str:
+        return self.spoken_text if self.spoken_text is not None else self.text
 
 
 class TTSEngine:
@@ -260,7 +318,7 @@ class TTSEngine:
         # requests. A single inference at a time also bounds peak memory.
         with self._lock:
             model = self.load(p.model_key)
-            for sentence in split_sentences(p.text, p.sentence_chars):
+            for sentence in split_sentences(p.speakable_text(), p.sentence_chars):
                 if cancelled and cancelled():
                     raise CancelledError("任务已取消")
                 results = self._generate(model, p, sentence, p.stream)
@@ -367,6 +425,9 @@ class TTSEngine:
                     raise ValueError("音色不存在或已被删除")
                 settings = db.get_settings()
                 params = current["params"]
+                spoken, used = apply_pronunciations(
+                    current["text"], db.list_pronunciations(enabled_only=True),
+                )
                 result = self.generate_file(SynthesisParams(
                     text=current["text"], voice=speaker, model_key=current["model_key"],
                     instruct=params.get("instruct"), temperature=params.get("temperature", .7),
@@ -376,8 +437,10 @@ class TTSEngine:
                     sentence_chars=settings["sentence_chars"],
                     streaming_interval=settings["streaming_interval"],
                     speed=params.get("speed", 1.0),
+                    spoken_text=spoken, pronunciation_ids=used,
                 ), task_id)
                 db.add_artifact(result)
+                db.bump_pronunciation_hits(used)
                 db.update_task(task_id, status="succeeded", artifact_id=result["id"],
                                finished_at=db.now(), duration_seconds=round(time.monotonic() - started, 3))
                 db.log("INFO", "task", "合成任务完成", task_id, {

@@ -1,6 +1,6 @@
 "use strict";
 const $ = id => document.getElementById(id);
-const state = { voices: [], models: [], settings: {}, artifacts: [], tasks: [], logs: [], current: "studio", lastArtifact: null, poll: null };
+const state = { voices: [], models: [], settings: {}, artifacts: [], tasks: [], logs: [], pronunciations: [], current: "studio", lastArtifact: null, poll: null };
 const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmt = (n, digits=2) => Number(n || 0).toFixed(digits);
 const formatBytes = n => n < 1024 ? `${n} B` : n < 1048576 ? `${fmt(n/1024,1)} KB` : n < 1073741824 ? `${fmt(n/1048576,1)} MB` : `${fmt(n/1073741824,2)} GB`;
@@ -355,5 +355,86 @@ $("voice-form").addEventListener("submit",async e=>{e.preventDefault();const id=
 function applyTheme(theme){document.documentElement.dataset.theme=theme;localStorage.setItem("ethan-tts-theme",theme);}
 $("theme-toggle").addEventListener("click",()=>applyTheme(document.documentElement.dataset.theme==="dark"?"light":"dark"));
 applyTheme(localStorage.getItem("ethan-tts-theme")||"light");
-async function init(){try{state.settings=await api("/api/settings");applyTheme(localStorage.getItem("ethan-tts-theme")||state.settings.theme);await loadVoices();renderSettings();updateCount();await loadOverview();navigate(location.hash.slice(1)||"studio");state.poll=setInterval(()=>{loadOverview();if(state.current==="tasks")loadTasks();if(state.current==="settings")loadModels();},5000);}catch(e){toast(`初始化失败：${e.message}`,true);}}
+
+// ---------------------------------------------------------------- pronunciation
+async function loadPronunciations() {
+  try {
+    const data = await api("/api/pronunciations");
+    state.pronunciations = data.items;
+    $("pron-list").innerHTML = data.items.length ? data.items.map(p => `<div class="pron-row">
+      <div class="pron-pair"><b>${esc(p.term)}</b><span class="arrow">→</span><b>${esc(p.say_as)}</b>${p.note ? `<small>${esc(p.note)}</small>` : ""}${p.match_case ? '<small>区分大小写</small>' : ""}</div>
+      <span class="pron-hits">${p.hits ? `命中 ${p.hits} 次` : "尚未命中"}</span>
+      <label class="switch" title="启用"><input type="checkbox" data-pron-toggle="${p.id}" ${p.is_enabled ? "checked" : ""}><span></span></label>
+      <button class="text-button" data-pron-edit="${p.id}">编辑</button>
+      <button class="text-button danger-text" data-pron-delete="${p.id}">删除</button>
+    </div>`).join("") : empty("还没有读音规则。试试添加 Qwen → 千问", "◉");
+  } catch (e) { toast(e.message, true); }
+}
+
+$("pron-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const term = $("pron-term").value.trim(), say_as = $("pron-say").value.trim();
+  if (!term || !say_as) return toast("原文和读法都要填", true);
+  setBusy("pron-add", true, "添加中…");
+  try {
+    const editing = $("pron-form").dataset.editId;
+    if (editing) {
+      await api(`/api/pronunciations/${editing}`, {method:"PATCH", body:JSON.stringify({term, say_as, note:$("pron-note").value.trim(), match_case:$("pron-case").checked})});
+    } else {
+      await api("/api/pronunciations", {method:"POST", body:JSON.stringify({term, say_as, note:$("pron-note").value.trim(), match_case:$("pron-case").checked})});
+    }
+    resetPronForm(); await loadPronunciations(); toast(editing ? "已更新读音规则" : "已添加读音规则");
+  } catch (err) { toast(err.message, true); }
+  finally { setBusy("pron-add", false); }
+});
+
+function resetPronForm() {
+  delete $("pron-form").dataset.editId;
+  $("pron-term").value = ""; $("pron-say").value = ""; $("pron-note").value = "";
+  $("pron-case").checked = false; $("pron-add").textContent = "＋ 添加";
+  $("pron-term").disabled = false;
+}
+
+$("pron-list").addEventListener("click", async e => {
+  const del = e.target.closest("[data-pron-delete]");
+  const edit = e.target.closest("[data-pron-edit]");
+  if (del) {
+    const rule = state.pronunciations.find(p => p.id === del.dataset.pronDelete);
+    if (!confirm(`删除「${rule?.term} → ${rule?.say_as}」？`)) return;
+    try { await api(`/api/pronunciations/${del.dataset.pronDelete}`, {method:"DELETE"}); await loadPronunciations(); toast("已删除"); }
+    catch (err) { toast(err.message, true); }
+  }
+  if (edit) {
+    const rule = state.pronunciations.find(p => p.id === edit.dataset.pronEdit);
+    if (!rule) return;
+    $("pron-form").dataset.editId = rule.id;
+    $("pron-term").value = rule.term; $("pron-say").value = rule.say_as;
+    $("pron-note").value = rule.note; $("pron-case").checked = !!rule.match_case;
+    $("pron-add").textContent = "保存修改";
+    $("pron-term").focus();
+  }
+});
+
+$("pron-list").addEventListener("change", async e => {
+  const toggle = e.target.closest("[data-pron-toggle]");
+  if (!toggle) return;
+  try {
+    await api(`/api/pronunciations/${toggle.dataset.pronToggle}`, {method:"PATCH", body:JSON.stringify({is_enabled: toggle.checked})});
+    toast(toggle.checked ? "已启用" : "已停用");
+  } catch (err) { toast(err.message, true); loadPronunciations(); }
+});
+
+$("pron-preview-btn").addEventListener("click", async () => {
+  const text = $("pron-test").value.trim() || "Qwen3-TTS 是本地模型，Qwen 这个词应该读作千问。";
+  setBusy("pron-preview-btn", true, "预览中…");
+  try {
+    const r = await api("/api/pronunciations/preview", {method:"POST", body:JSON.stringify({text})});
+    const hits = r.matches.map(m => `<span class="hit">${esc(m.term)} → ${esc(m.say_as)}</span>`).join("");
+    $("pron-result").hidden = false;
+    $("pron-result").innerHTML = `<span class="label">模型实际会读</span><span class="spoken">${esc(r.spoken)}</span>${hits || '<span class="label">没有命中任何规则</span>'}`;
+  } catch (e) { toast(e.message, true); }
+  finally { setBusy("pron-preview-btn", false); }
+});
+
+async function init(){try{state.settings=await api("/api/settings");applyTheme(localStorage.getItem("ethan-tts-theme")||state.settings.theme);await loadVoices();renderSettings();updateCount();await loadOverview();await loadPronunciations();navigate(location.hash.slice(1)||"studio");state.poll=setInterval(()=>{loadOverview();if(state.current==="tasks")loadTasks();if(state.current==="settings")loadModels();},5000);}catch(e){toast(`初始化失败：${e.message}`,true);}}
 init();

@@ -101,6 +101,13 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_logs_created ON logs(id DESC);
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS pronunciations (
+                id TEXT PRIMARY KEY, term TEXT NOT NULL, say_as TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '', match_case INTEGER NOT NULL DEFAULT 0,
+                is_enabled INTEGER NOT NULL DEFAULT 1, hits INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_pronunciations_term ON pronunciations(term);
             """
         )
         stamp = now()
@@ -116,6 +123,66 @@ def init_db() -> None:
         for key, value in DEFAULT_SETTINGS.items():
             db.execute("INSERT OR IGNORE INTO settings VALUES (?,?)", (key, dumps(value)))
         db.execute("UPDATE tasks SET status='interrupted', error='服务重启，任务中断' WHERE status IN ('queued','running')")
+
+
+# ---------------------------------------------------------------- pronunciation
+
+
+def list_pronunciations(enabled_only: bool = False) -> list[dict[str, Any]]:
+    clause = "WHERE is_enabled=1" if enabled_only else ""
+    with connect() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM pronunciations {clause} ORDER BY length(term) DESC, term"
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def pronunciation(pron_id: str) -> dict[str, Any] | None:
+    with connect() as conn:
+        return row_dict(conn.execute(
+            "SELECT * FROM pronunciations WHERE id=?", (pron_id,),
+        ).fetchone())
+
+
+def create_pronunciation(term: str, say_as: str, note: str = "",
+                         match_case: bool = False, is_enabled: bool = True) -> dict[str, Any]:
+    import uuid
+    pron_id = f"pron:{uuid.uuid4().hex[:12]}"
+    stamp = now()
+    with _write_lock, connect() as conn:
+        conn.execute(
+            """INSERT INTO pronunciations
+            (id,term,say_as,note,match_case,is_enabled,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?)""",
+            (pron_id, term.strip(), say_as.strip(), note.strip(), int(match_case),
+             int(is_enabled), stamp, stamp),
+        )
+    return pronunciation(pron_id)
+
+
+def update_pronunciation(pron_id: str, **values: Any) -> dict[str, Any] | None:
+    if not values:
+        return pronunciation(pron_id)
+    values["updated_at"] = now()
+    sql = ",".join(f"{key}=?" for key in values)
+    with _write_lock, connect() as conn:
+        conn.execute(f"UPDATE pronunciations SET {sql} WHERE id=?",
+                     (*values.values(), pron_id))
+    return pronunciation(pron_id)
+
+
+def delete_pronunciation(pron_id: str) -> None:
+    with _write_lock, connect() as conn:
+        conn.execute("DELETE FROM pronunciations WHERE id=?", (pron_id,))
+
+
+def bump_pronunciation_hits(ids: list[str]) -> None:
+    if not ids:
+        return
+    with _write_lock, connect() as conn:
+        conn.executemany(
+            "UPDATE pronunciations SET hits=hits+1 WHERE id=?", [(i,) for i in ids],
+        )
 
 
 def log(level: str, category: str, message: str, task_id: str | None = None,
