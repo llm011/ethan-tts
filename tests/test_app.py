@@ -221,3 +221,59 @@ def test_path_traversal_and_missing_artifacts(client):
     assert client.get("/api/artifacts/not-found/audio").status_code == 404
     assert client.get("/api/artifacts/..%2F..%2Fetc/audio").status_code == 404
     assert client.post("/api/models/download", json={"model_key": "unknown"}).status_code == 400
+
+
+def test_pronunciation_rewrites_terms_without_chains():
+    from engine import apply_pronunciations
+    rules = [
+        {"id": "a", "term": "Qwen", "say_as": "千问", "is_enabled": 1, "match_case": 0},
+        {"id": "b", "term": "千问", "say_as": "错误", "is_enabled": 1, "match_case": 0},
+    ]
+    spoken, used = apply_pronunciations("Qwen 和 qwen 都要读对。", rules)
+    # The replacement output must not be re-scanned by the second rule.
+    assert spoken == "千问 和 千问 都要读对。"
+    assert used == ["a", "a"]
+
+
+def test_pronunciation_respects_word_boundaries():
+    from engine import apply_pronunciations
+    rules = [{"id": "a", "term": "Qwen", "say_as": "千问", "is_enabled": 1, "match_case": 0}]
+    assert apply_pronunciations("QwenTTS", rules)[0] == "QwenTTS"
+    assert apply_pronunciations("Qwen3", rules)[0] == "Qwen3"
+    assert apply_pronunciations("用 Qwen 做语音", rules)[0] == "用 千问 做语音"
+
+
+def test_pronunciation_case_sensitive_and_longest_first():
+    from engine import apply_pronunciations
+    rules = [
+        {"id": "a", "term": "qwen", "say_as": "千问", "is_enabled": 1, "match_case": 1},
+        {"id": "b", "term": "Qwen3-TTS", "say_as": "千问三语音", "is_enabled": 1, "match_case": 0},
+    ]
+    assert apply_pronunciations("Qwen 和 qwen", rules)[0] == "Qwen 和 千问"
+    # Longest term wins even though the shorter one would also match.
+    assert apply_pronunciations("Qwen3-TTS 很好", rules)[0] == "千问三语音 很好"
+
+
+def test_pronunciation_disabled_rules_are_ignored():
+    from engine import apply_pronunciations
+    rules = [{"id": "a", "term": "Qwen", "say_as": "千问", "is_enabled": 0, "match_case": 0}]
+    assert apply_pronunciations("Qwen", rules)[0] == "Qwen"
+
+
+def test_pronunciation_api_crud_and_preview(client):
+    created = client.post("/api/pronunciations", json={
+        "term": "Qwen", "say_as": "千问", "note": "模型总读错",
+    })
+    assert created.status_code == 201
+    pron_id = created.json()["id"]
+    assert client.post("/api/pronunciations", json={
+        "term": "qwen", "say_as": "重复",
+    }).status_code == 400
+    preview = client.post("/api/pronunciations/preview", json={"text": "Qwen3-TTS 用 Qwen"})
+    assert preview.status_code == 200
+    assert preview.json()["spoken"] == "Qwen3-TTS 用 千问"
+    assert preview.json()["changed"] is True
+    assert client.patch(f"/api/pronunciations/{pron_id}", json={"is_enabled": False}).json()["is_enabled"] == 0
+    assert client.post("/api/pronunciations/preview", json={"text": "Qwen"}).json()["spoken"] == "Qwen"
+    assert client.delete(f"/api/pronunciations/{pron_id}").json()["ok"] is True
+    assert client.delete(f"/api/pronunciations/{pron_id}").status_code == 404

@@ -22,7 +22,10 @@ from config import (
     ARTIFACT_DIR, DEFAULT_MODEL, DEFAULT_SETTINGS, MAX_REFERENCE_BYTES,
     MIN_REFERENCE_SECONDS, MODELS, ROOT, VOICE_DIR,
 )
-from engine import CancelledError, SynthesisParams, engine, model_installed, stream_wav_header
+from engine import (
+    CancelledError, SynthesisParams, apply_pronunciations, engine, model_installed,
+    stream_wav_header,
+)
 
 
 @asynccontextmanager
@@ -94,6 +97,34 @@ class ModelDownload(BaseModel):
     model_key: str
 
 
+class PronunciationCreate(BaseModel):
+    term: str = Field(min_length=1, max_length=60)
+    say_as: str = Field(min_length=1, max_length=120)
+    note: str = Field(default="", max_length=200)
+    match_case: bool = False
+    is_enabled: bool = True
+
+    @field_validator("term", "say_as")
+    @classmethod
+    def strip_value(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("不能为空")
+        return value
+
+
+class PronunciationPatch(BaseModel):
+    term: str | None = Field(default=None, min_length=1, max_length=60)
+    say_as: str | None = Field(default=None, min_length=1, max_length=120)
+    note: str | None = Field(default=None, max_length=200)
+    match_case: bool | None = None
+    is_enabled: bool | None = None
+
+
+class PronunciationPreview(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
+
+
 def ensure_voice(voice_id: str) -> dict:
     speaker = db.voice_for_engine(voice_id)
     if not speaker:
@@ -113,13 +144,16 @@ def synthesis_params(req: SynthesisRequest, speaker: dict) -> SynthesisParams:
                  "clone": "base-0.6b-4bit"}[speaker["kind"]]
     if not model_installed(model_key):
         raise HTTPException(409, f"请先下载 {MODELS[model_key]['name']} 模型")
+    # Pronunciation rules rewrite only what the model is asked to say; the
+    # artifact keeps the original text so the library stays searchable.
+    spoken, used = apply_pronunciations(req.text, db.list_pronunciations(enabled_only=True))
     return SynthesisParams(
         text=req.text, voice=speaker, model_key=model_key,
         instruct=req.instruct or speaker["instruct"], temperature=req.temperature,
         top_k=req.top_k, top_p=req.top_p, repetition_penalty=req.repetition_penalty,
         max_tokens=req.max_tokens, sentence_chars=req.sentence_chars or settings["sentence_chars"],
         streaming_interval=req.streaming_interval or settings["streaming_interval"],
-        speed=req.speed,
+        speed=req.speed, spoken_text=spoken, pronunciation_ids=used,
     )
 
 
@@ -293,6 +327,7 @@ def synthesize(req: SynthesisRequest) -> Response:
         db.update_task(task_id, status="succeeded", artifact_id=result["id"], finished_at=db.now(),
                        duration_seconds=result["generation_seconds"])
         db.log("INFO", "task", "同步合成完成", task_id, {"artifact_id": result["id"]})
+        db.bump_pronunciation_hits(params.pronunciation_ids)
         data = (ARTIFACT_DIR / result["filename"]).read_bytes()
         return Response(data, media_type="audio/wav", headers={
             "X-Task-ID": task_id, "X-Artifact-ID": result["id"],
@@ -466,6 +501,60 @@ def clear_logs() -> dict:
         count = conn.execute("SELECT COUNT(*) n FROM logs").fetchone()["n"]
         conn.execute("DELETE FROM logs")
     return {"ok": True, "deleted": count}
+
+
+@app.get("/api/pronunciations")
+def list_pronunciations() -> dict:
+    return {"items": db.list_pronunciations()}
+
+
+@app.post("/api/pronunciations", status_code=201)
+def create_pronunciation(req: PronunciationCreate) -> dict:
+    existing = {r["term"].lower() for r in db.list_pronunciations()}
+    if req.term.lower() in existing:
+        raise HTTPException(400, f"已存在「{req.term}」的替换规则，请直接修改")
+    item = db.create_pronunciation(
+        req.term, req.say_as, req.note, req.match_case, req.is_enabled,
+    )
+    db.log("INFO", "pronunciation", f"新增读音规则 {req.term} → {req.say_as}")
+    return item
+
+
+@app.patch("/api/pronunciations/{pron_id}")
+def update_pronunciation(pron_id: str, req: PronunciationPatch) -> dict:
+    if not db.pronunciation(pron_id):
+        raise HTTPException(404, "读音规则不存在")
+    values = req.model_dump(exclude_unset=True)
+    for key in ("match_case", "is_enabled"):
+        if key in values and values[key] is not None:
+            values[key] = int(values[key])
+    values = {k: v for k, v in values.items() if v is not None}
+    return db.update_pronunciation(pron_id, **values)
+
+
+@app.delete("/api/pronunciations/{pron_id}")
+def delete_pronunciation(pron_id: str) -> dict:
+    item = db.pronunciation(pron_id)
+    if not item:
+        raise HTTPException(404, "读音规则不存在")
+    db.delete_pronunciation(pron_id)
+    db.log("INFO", "pronunciation", f"删除读音规则 {item['term']}")
+    return {"ok": True}
+
+
+@app.post("/api/pronunciations/preview")
+def preview_pronunciation(req: PronunciationPreview) -> dict:
+    """Show exactly what the model would be asked to say, without synthesizing."""
+    rules = db.list_pronunciations(enabled_only=True)
+    spoken, used = apply_pronunciations(req.text, rules)
+    by_id = {r["id"]: r for r in rules}
+    return {
+        "original": req.text,
+        "spoken": spoken,
+        "changed": spoken != req.text,
+        "matches": [{"term": by_id[i]["term"], "say_as": by_id[i]["say_as"]}
+                    for i in dict.fromkeys(used)],
+    }
 
 
 @app.get("/api/settings")

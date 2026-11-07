@@ -364,6 +364,44 @@ def cmd_models(args: argparse.Namespace) -> int:
     raise ApiError("未知操作")
 
 
+def cmd_pronounce(args: argparse.Namespace) -> int:
+    ensure_server(args.base, args.autostart)
+    if args.action == "list":
+        items = request("/api/pronunciations", base=args.base)["items"]
+        if args.json:
+            emit([{k: p[k] for k in ("id", "term", "say_as", "note",
+                                    "match_case", "is_enabled", "hits")} for p in items], True)
+        else:
+            for p in items:
+                state = "" if p["is_enabled"] else "（已停用）"
+                print(f"{p['id']:<20} {p['term']:<14} → {p['say_as']:<14} "
+                      f"命中 {p['hits']:<4}{state}{p['note']}")
+        return 0
+    if args.action == "add":
+        item = request("/api/pronunciations", "POST", {
+            "term": args.term, "say_as": args.say_as,
+            "note": args.note or "", "match_case": args.match_case,
+        }, base=args.base)
+        emit(item, args.json, human=f"已添加 {item['term']} → {item['say_as']}")
+        return 0
+    if args.action == "rm":
+        items = request("/api/pronunciations", base=args.base)["items"]
+        target = next((p for p in items if p["id"] == args.term), None) or \
+            next((p for p in items if p["term"].lower() == args.term.lower()), None)
+        if not target:
+            raise ApiError(f"找不到读音规则：{args.term}")
+        request(f"/api/pronunciations/{target['id']}", "DELETE", base=args.base)
+        emit({"deleted": target["id"]}, args.json,
+             human=f"已删除 {target['term']} → {target['say_as']}")
+        return 0
+    if args.action == "preview":
+        text = args.text if args.text != "-" else sys.stdin.read()
+        result = request("/api/pronunciations/preview", "POST", {"text": text}, base=args.base)
+        emit(result, args.json, human=f"原文：{result['original']}\n实际读：{result['spoken']}")
+        return 0
+    raise ApiError("未知操作")
+
+
 def cmd_logs(args: argparse.Namespace) -> int:
     ensure_server(args.base, args.autostart)
     query = "?" + urllib.parse.urlencode({k: v for k, v in {
@@ -508,6 +546,23 @@ def build_parser() -> argparse.ArgumentParser:
     logs.add_argument("--category")
     logs.add_argument("--limit", "-l", type=int, default=30)
     logs.set_defaults(func=cmd_logs)
+
+    pronounce = sub.add_parser("pronounce", help="读音纠正规则", parents=[common])
+    pron_sub = pronounce.add_subparsers(dest="action", required=True)
+    plist = pron_sub.add_parser("list", parents=[common])
+    plist.set_defaults(func=cmd_pronounce, action="list")
+    padd = pron_sub.add_parser("add", parents=[common])
+    padd.add_argument("term", help="原文，例如 Qwen")
+    padd.add_argument("say_as", help="读作，例如 千问")
+    padd.add_argument("--note", "-n")
+    padd.add_argument("--match-case", action="store_true")
+    padd.set_defaults(func=cmd_pronounce, action="add")
+    prm = pron_sub.add_parser("rm", parents=[common])
+    prm.add_argument("term", help="原文或规则 id")
+    prm.set_defaults(func=cmd_pronounce, action="rm")
+    pprev = pron_sub.add_parser("preview", parents=[common])
+    pprev.add_argument("text", nargs="?", default="-")
+    pprev.set_defaults(func=cmd_pronounce, action="preview")
 
     status = sub.add_parser("status", help="查看服务与资源状态", parents=[common])
     status.set_defaults(func=cmd_status)
