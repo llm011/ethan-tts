@@ -40,10 +40,64 @@ def split_sentences(text: str, max_len: int = 40) -> list[str]:
     return out or [text.strip()]
 
 
-def to_pcm16(audio: mx.array) -> bytes:
-    # mlx.core.array does not implement NumPy's .tobytes() method.
-    pcm = (mx.clip(audio, -1.0, 1.0) * 32767).astype(mx.int16)
-    return np.asarray(pcm, dtype=np.int16).tobytes()
+def to_pcm16(audio: mx.array | np.ndarray) -> bytes:
+    # Convert through NumPy; mlx.core.array itself has no .tobytes() method.
+    samples = np.asarray(audio, dtype=np.float32)
+    pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype("<i2")
+    return pcm.tobytes()
+
+
+def sentence_pause_seconds(sentence: str) -> float:
+    """Natural join pause after removing the model's own edge padding."""
+    if sentence.endswith(("，", ",", "、", "：", ":")):
+        return .10
+    if sentence.endswith(("。", "！", "？", "!", "?")):
+        return .26
+    if sentence.endswith(("；", ";")):
+        return .20
+    return .12
+
+
+def trim_edge_silence(
+    audio: mx.array | np.ndarray,
+    sentence: str,
+    trim_start: bool = True,
+    trim_end: bool = True,
+) -> np.ndarray:
+    """Trim only generated edge padding, never silence inside speech.
+
+    Qwen3-TTS adds roughly 300 ms at both ends of every independent segment.
+    Concatenating segments otherwise produces an artificial 600 ms hole.
+    A short pre-roll protects quiet consonants; punctuation controls the join.
+    """
+    samples = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if not len(samples):
+        return samples
+    frame = max(1, int(SAMPLE_RATE * .01))
+    frame_count = (len(samples) + frame - 1) // frame
+    padded = np.pad(samples, (0, frame_count * frame - len(samples)))
+    rms = np.sqrt(np.mean(padded.reshape(frame_count, frame) ** 2, axis=1))
+    active = np.flatnonzero(rms >= 10 ** (-45 / 20))
+    if not len(active):
+        return np.zeros(int(SAMPLE_RATE * sentence_pause_seconds(sentence)), dtype=np.float32) if trim_end else samples[:0]
+
+    start = 0
+    end = len(samples)
+    if trim_start:
+        first_active = int(active[0] * frame)
+        start = max(0, first_active - int(SAMPLE_RATE * .03))
+    if trim_end:
+        last_active = min(len(samples), int((active[-1] + 1) * frame))
+        end = last_active
+    trimmed = samples[start:end].copy()
+    if trim_end:
+        # A tiny fade prevents clicks when the active frame ends non-zero.
+        fade = min(len(trimmed), int(SAMPLE_RATE * .005))
+        if fade:
+            trimmed[-fade:] *= np.linspace(1, 0, fade, dtype=np.float32)
+        pause = np.zeros(int(SAMPLE_RATE * sentence_pause_seconds(sentence)), dtype=np.float32)
+        trimmed = np.concatenate((trimmed, pause))
+    return trimmed
 
 
 def stream_wav_header() -> bytes:
@@ -52,6 +106,53 @@ def stream_wav_header() -> bytes:
         + struct.pack("<IHHIIHH", 16, 1, 1, SAMPLE_RATE, SAMPLE_RATE * 2, 2, 16)
         + b"data" + struct.pack("<I", 0xFFFFFFFF)
     )
+
+
+def change_speed(samples: np.ndarray, speed: float) -> np.ndarray:
+    """Change tempo without changing pitch.
+
+    Qwen3-TTS has no native speed parameter (its `speed` argument is documented
+    as "not directly supported yet"). Resampling the token stream would also
+    distort timbre, so tempo is adjusted after generation with ffmpeg atempo,
+    which preserves pitch and formants.
+    """
+    if speed <= 1.0 + 1e-3 and speed >= 1.0 - 1e-3:
+        return samples
+    speed = max(.5, min(2.0, float(speed)))
+    import shutil
+    import subprocess
+    import tempfile
+
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError("语速调整需要 ffmpeg；请先安装，或使用 speed=1.0")
+    pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype("<i2").tobytes()
+    with tempfile.TemporaryDirectory() as tmp:
+        source = Path(tmp) / "in.wav"
+        target = Path(tmp) / "out.wav"
+        with wave.open(str(source), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(SAMPLE_RATE)
+            wav.writeframes(pcm)
+        # atempo accepts 0.5–2.0 per instance; chain filters outside that range.
+        filters = []
+        remaining = speed
+        while remaining > 2.0:
+            filters.append("atempo=2.0")
+            remaining /= 2.0
+        while remaining < .5:
+            filters.append("atempo=0.5")
+            remaining /= .5
+        filters.append(f"atempo={remaining:.6f}")
+        process = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
+             "-filter:a", ",".join(filters), str(target)],
+            capture_output=True, text=True,
+        )
+        if process.returncode:
+            raise RuntimeError(f"语速调整失败：{process.stderr.strip()[-400:]}")
+        with wave.open(str(target), "rb") as wav:
+            return np.frombuffer(wav.readframes(wav.getnframes()), dtype="<i2").astype(np.float32) / 32768
 
 
 def model_path(model_key: str) -> Path:
@@ -83,6 +184,7 @@ class SynthesisParams:
     sentence_chars: int = 40
     streaming_interval: float = 0.32
     stream: bool = False
+    speed: float = 1.0
 
 
 class TTSEngine:
@@ -161,8 +263,37 @@ class TTSEngine:
             for sentence in split_sentences(p.text, p.sentence_chars):
                 if cancelled and cancelled():
                     raise CancelledError("任务已取消")
-                for result in self._generate(model, p, sentence, p.stream):
-                    yield to_pcm16(result.audio)
+                results = self._generate(model, p, sentence, p.stream)
+                if not p.stream:
+                    for result in results:
+                        trimmed = trim_edge_silence(result.audio, sentence)
+                        if p.speed != 1.0:
+                            # Keep the join pause intact; only the speech is
+                            # time-stretched, so the pause is re-appended after.
+                            pause = int(SAMPLE_RATE * sentence_pause_seconds(sentence))
+                            speech = trimmed[:-pause] if pause and len(trimmed) > pause else trimmed
+                            stretched = change_speed(speech, p.speed)
+                            trimmed = np.concatenate((
+                                stretched, np.zeros(pause, dtype=np.float32),
+                            ))
+                        yield to_pcm16(trimmed)
+                else:
+                    # One-chunk lookahead lets us trim only the first and last
+                    # chunks without cutting natural pauses inside the segment.
+                    pending: np.ndarray | None = None
+                    for result in results:
+                        if pending is None:
+                            first = trim_edge_silence(result.audio, sentence, trim_end=False)
+                            if not len(first):
+                                continue
+                            pending = first
+                            continue
+                        yield to_pcm16(pending)
+                        pending = np.asarray(result.audio, dtype=np.float32).reshape(-1)
+                    if pending is not None:
+                        yield to_pcm16(trim_edge_silence(
+                            pending, sentence, trim_start=False, trim_end=True,
+                        ))
                 if cancelled and cancelled():
                     raise CancelledError("任务已取消")
 
@@ -193,6 +324,7 @@ class TTSEngine:
             "sample_rate": SAMPLE_RATE, "params": db.dumps({
                 "instruct": p.instruct, "temperature": p.temperature, "top_k": p.top_k,
                 "top_p": p.top_p, "repetition_penalty": p.repetition_penalty,
+                "speed": p.speed,
             }), "created_at": db.now(),
         }
 
@@ -243,6 +375,7 @@ class TTSEngine:
                     max_tokens=params.get("max_tokens"),
                     sentence_chars=settings["sentence_chars"],
                     streaming_interval=settings["streaming_interval"],
+                    speed=params.get("speed", 1.0),
                 ), task_id)
                 db.add_artifact(result)
                 db.update_task(task_id, status="succeeded", artifact_id=result["id"],

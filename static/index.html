@@ -50,13 +50,14 @@
             <input id="synth-instruct" class="input" placeholder="例如：轻快一点，带些笑意">
             <details class="advanced"><summary>高级参数 <span>展开</span></summary><div class="advanced-grid">
               <label>温度 <span id="temperature-value">0.7</span><input type="range" id="temperature" min="0" max="2" step=".1" value=".7"></label>
+              <label>语速 <span id="speed-value">1.0×</span><input type="range" id="speed" min=".5" max="2" step=".05" value="1"></label>
               <label>重复惩罚<input type="number" class="input" id="repetition" min=".8" max="2" step=".01" value="1.05"></label>
               <label>Top K<input type="number" class="input" id="top-k" min="1" max="200" value="50"></label>
               <label>Top P<input type="number" class="input" id="top-p" min=".01" max="1" step=".05" value="1"></label>
             </div></details>
           </div>
         </div>
-        <div class="synthesis-bar"><div class="synthesis-hint"><span class="dot"></span><span id="model-hint">模型已就绪，首次合成自动加载</span></div><div class="synthesis-actions"><button class="button secondary" id="required-model-btn" hidden>↓ 下载所需模型</button><button class="button secondary" id="stream-btn">▶ 流式试听</button><button class="button primary" id="synth-btn">✦ 合成音频 <span>↗</span></button></div></div>
+        <div class="synthesis-bar"><div class="synthesis-hint"><span class="dot"></span><span id="model-hint">模型已就绪，首次合成自动加载</span></div><div class="synthesis-actions"><button class="button secondary" id="required-model-btn" hidden>↓ 下载所需模型</button><button class="button secondary" id="stream-btn">▶ 流式试听</button><button class="button secondary" id="pause-btn" hidden>❚❚ 暂停</button><button class="button secondary" id="stop-stream-btn" hidden>■ 停止</button><button class="button primary" id="synth-btn">✦ 合成音频 <span>↗</span></button></div></div>
         <div class="panel result-panel" id="result-panel">
           <div class="panel-head"><span class="panel-title">最近合成</span><span class="muted" id="result-status">等待你的第一次创作</span></div>
           <div class="empty compact" id="result-empty"><span class="empty-icon">♪</span><p>生成的音频会出现在这里，也会自动存入音频产物。</p></div>

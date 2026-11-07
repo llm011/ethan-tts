@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ethan-tts"
+version = "0.2.0"
+description = "Local Qwen3-TTS voice studio and agent-friendly CLI for Apple Silicon"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+  "mlx-audio==0.6.4",
+  "fastapi==0.162.0",
+  "uvicorn==0.54.0",
+  "python-multipart==0.0.33",
+]
+
+[project.optional-dependencies]
+dev = ["httpx==0.28.1", "pytest==8.4.2"]
+
+[project.scripts]
+ethan-tts = "cli:main"
+
+[tool.setuptools]
+py-modules = ["app", "cli", "config", "db", "engine", "download_model"]
+
+[tool.setuptools.package-data]
+"*" = ["static/*"]
