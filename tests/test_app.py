@@ -295,3 +295,35 @@ def test_pronunciation_case_variants_can_coexist(client):
     assert client.post("/api/pronunciations", json={
         "term": "QWEN", "say_as": "重复",
     }).status_code == 400
+
+
+def test_streaming_applies_speed(client, monkeypatch):
+    """Streaming must honour speed too; it used to be ignored entirely."""
+    import shutil
+    import numpy as np
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg required for tempo changes")
+    monkeypatch.setattr(application, "model_installed", lambda _: True)
+
+    class FakeResult:
+        def __init__(self, audio):
+            self.audio = audio
+
+    def fake_generate(model, params, sentence, stream):
+        # 2 s of tone per sentence, mimicking one full segment.
+        t = np.arange(24000 * 2) / 24000
+        yield FakeResult((.4 * np.sin(2 * np.pi * 220 * t)).astype(np.float32))
+
+    monkeypatch.setattr(application.engine, "_generate", fake_generate)
+    monkeypatch.setattr(application.engine, "load", lambda key: object())
+
+    def run(speed):
+        response = client.post("/api/tts/stream", json={
+            "text": "一句话。", "voice_id": "preset:Vivian", "speed": speed,
+        })
+        assert response.status_code == 200
+        return len(response.content) - 44
+
+    normal = run(1.0)
+    faster = run(1.6)
+    assert faster < normal * .8
