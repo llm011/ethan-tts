@@ -327,3 +327,17 @@ def test_streaming_applies_speed(client, monkeypatch):
     normal = run(1.0)
     faster = run(1.6)
     assert faster < normal * .8
+
+
+def test_static_assets_are_served(client):
+    """The custom select needs select.js reachable and loaded before app.js."""
+    page = client.get("/")
+    assert page.status_code == 200
+    html = page.text
+    assert '/static/select.js' in html
+    assert html.index('select.js') < html.index('app.js')
+    script = client.get("/static/select.js")
+    assert script.status_code == 200
+    assert "CustomSelect" in script.text
+    css = client.get("/static/style.css")
+    assert ".cs-popup" in css.text and ".cs-trigger" in css.text
