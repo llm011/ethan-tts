@@ -379,11 +379,13 @@ async function loadSessions() {
 
 function renderSessions() {
   $("session-list").innerHTML = state.sessions.length
-    ? state.sessions.map(session => `<button class="rail-item${session.id === state.sessionId ? " active" : ""}" data-session="${esc(session.id)}">
-        <strong>${esc(session.title)}</strong>
-        <span>${esc((session.preview || "空白对话").slice(0, 30))}${session.message_count ? ` · ${session.message_count}` : ""}</span>
-        <i class="del" data-del-session="${esc(session.id)}">×</i>
-      </button>`).join("")
+    ? state.sessions.map(session => `<div class="rail-row">
+        <button class="rail-item${session.id === state.sessionId ? " active" : ""}" data-session="${esc(session.id)}">
+          <span class="rail-title">${esc(session.title)}</span>
+          <span class="rail-preview">${esc((session.preview || "空白对话").slice(0, 30))}${session.message_count ? ` · ${session.message_count}` : ""}</span>
+        </button>
+        <button class="rail-del" data-del-session="${esc(session.id)}" title="删除对话" aria-label="删除对话">×</button>
+      </div>`).join("")
     : `<div class="rail-empty">还没有对话，按一下麦克风开始吧</div>`;
 }
 
