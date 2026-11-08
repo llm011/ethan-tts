@@ -21,7 +21,7 @@ import single_instance as si  # noqa: E402
 
 def test_second_acquire_in_same_process_is_refused(tmp_path):
     """同一进程重复 acquire 也要被拒（flock 对同进程再开一个 fd 不共享锁）。"""
-    pid_file = tmp_path / "server.pid"
+    pid_file = tmp_path / "server.lock"
     lock = si.SingleInstanceLock(pid_file)
     lock.acquire()
     try:
@@ -34,7 +34,7 @@ def test_second_acquire_in_same_process_is_refused(tmp_path):
 
 def test_lock_released_allows_reacquire(tmp_path):
     """release 之后必须能重新拿到（否则重启服务会一直被拒）。"""
-    pid_file = tmp_path / "server.pid"
+    pid_file = tmp_path / "server.lock"
     first = si.SingleInstanceLock(pid_file)
     first.acquire()
     first.release()
@@ -45,7 +45,7 @@ def test_lock_released_allows_reacquire(tmp_path):
 
 
 def test_pid_file_records_owner(tmp_path):
-    pid_file = tmp_path / "server.pid"
+    pid_file = tmp_path / "server.lock"
     lock = si.SingleInstanceLock(pid_file)
     lock.acquire()
     try:
