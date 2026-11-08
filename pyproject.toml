@@ -23,7 +23,9 @@ dev = ["httpx==0.28.1", "pytest==8.4.2"]
 ethan-tts = "cli:main"
 
 [tool.setuptools]
-py-modules = ["app", "cli", "config", "db", "engine", "download_model"]
+py-modules = ["app", "cli", "config", "db", "engine", "download_model", "stt", "llm", "chat"]
 
 [tool.setuptools.package-data]
-"*" = ["static/*"]
+# chat.webmanifest is a document served by /chat.webmanifest, not a module:
+# an installed wheel must ship it or that route answers 500.
+"*" = ["static/*", "static/chat.webmanifest"]

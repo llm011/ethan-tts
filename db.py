@@ -10,7 +10,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from config import DB_PATH, DEFAULT_SETTINGS, MIN_REFERENCE_SECONDS, PRESET_SPEAKERS, SAMPLE_RATE, VOICE_DIR
+from config import (
+    CHAT_DEFAULTS, CHAT_SETTING_KEYS, DB_PATH, DEFAULT_SETTINGS, MIN_REFERENCE_SECONDS,
+    PRESET_SPEAKERS, SAMPLE_RATE, VOICE_DIR,
+)
 
 _write_lock = threading.RLock()
 
@@ -202,6 +205,56 @@ def get_settings() -> dict[str, Any]:
     return result
 
 
+def get_chat_settings() -> dict[str, Any]:
+    """Defaults merged with the stored overrides, without exposing raw keys."""
+    with connect() as db:
+        values = {r["key"]: loads(r["value"]) for r in db.execute("SELECT * FROM settings")}
+    result = dict(CHAT_DEFAULTS)
+    result.update({k: v for k, v in values.items() if k in CHAT_SETTING_KEYS})
+    result["has_api_key"] = bool(values.get("llm_api_key"))
+    result["configured"] = llm_configured(result)
+    # The key itself never leaves the process; the page only needs to know
+    # whether one is stored and the last four characters for confirmation.
+    result.pop("llm_api_key", None)
+    return result
+
+
+def llm_configured(settings: dict[str, Any] | None = None) -> bool:
+    settings = settings or get_chat_settings()
+    return bool(str(settings.get("llm_base_url") or "").strip()
+                and str(settings.get("llm_model") or "").strip())
+
+
+def update_chat_settings(values: dict[str, Any]) -> dict[str, Any]:
+    """Persist chat settings.
+
+    ``llm_api_key`` is special: an empty string keeps the stored key (the page
+    never receives it back), ``"__clear__"`` deletes it.
+    """
+    allowed = set(CHAT_SETTING_KEYS)
+    pending: dict[str, Any] = {}
+    with connect() as db:
+        for key, value in values.items():
+            if key not in allowed:
+                continue
+            if key == "llm_api_key":
+                if value == "__clear__":
+                    value = ""
+                elif not str(value or "").strip():
+                    continue
+                else:
+                    value = str(value).strip()
+            pending[key] = value
+    if pending:
+        with _write_lock, connect() as db:
+            for key, value in pending.items():
+                db.execute(
+                    "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, dumps(value)),
+                )
+    return get_chat_settings()
+
+
 def update_settings(values: dict[str, Any]) -> dict[str, Any]:
     allowed = set(DEFAULT_SETTINGS)
     with _write_lock, connect() as db:
@@ -275,3 +328,119 @@ def delete_files(paths: list[str]) -> None:
                 target.unlink()
         except OSError:
             pass
+
+
+# ---------------------------------------------------------------- chat
+# Voice chat is stored as sessions of ordered turns so the page can reopen an
+# old conversation and the page can replay a transcript instead of only TTS.
+
+def _chat_columns(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS chat_sessions (
+            id TEXT PRIMARY KEY, title TEXT NOT NULL,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated ON chat_sessions(updated_at DESC);
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+            role TEXT NOT NULL, content TEXT NOT NULL,
+            input_mode TEXT NOT NULL DEFAULT 'voice',
+            asr_model TEXT, asr_seconds REAL, asr_elapsed REAL,
+            llm_model TEXT, elapsed REAL, error TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, created_at);
+        """
+    )
+
+
+def create_chat_session(title: str = "新的对话") -> dict[str, Any]:
+    import uuid
+    session_id = f"chat:{uuid.uuid4().hex[:12]}"
+    stamp = now()
+    with _write_lock, connect() as conn:
+        _chat_columns(conn)
+        conn.execute("INSERT INTO chat_sessions(id,title,created_at,updated_at) VALUES(?,?,?,?)",
+                     (session_id, title.strip() or "新的对话", stamp, stamp))
+    return chat_session(session_id)
+
+
+def chat_session(session_id: str) -> dict[str, Any] | None:
+    with connect() as conn:
+        _chat_columns(conn)
+        return row_dict(conn.execute(
+            "SELECT * FROM chat_sessions WHERE id=?", (session_id,),
+        ).fetchone())
+
+
+def list_chat_sessions(limit: int = 50) -> list[dict[str, Any]]:
+    with connect() as conn:
+        _chat_columns(conn)
+        rows = conn.execute(
+            """SELECT s.*,
+                (SELECT COUNT(*) FROM chat_messages m WHERE m.session_id=s.id) AS message_count,
+                (SELECT content FROM chat_messages m WHERE m.session_id=s.id
+                   ORDER BY created_at DESC, rowid DESC LIMIT 1) AS preview
+            FROM chat_sessions s ORDER BY updated_at DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def rename_chat_session(session_id: str, title: str) -> None:
+    with _write_lock, connect() as conn:
+        _chat_columns(conn)
+        conn.execute("UPDATE chat_sessions SET title=? WHERE id=?", (title.strip()[:60], session_id))
+
+
+def touch_chat_session(session_id: str) -> None:
+    with _write_lock, connect() as conn:
+        _chat_columns(conn)
+        conn.execute("UPDATE chat_sessions SET updated_at=? WHERE id=?", (now(), session_id))
+
+
+def delete_chat_session(session_id: str) -> None:
+    with _write_lock, connect() as conn:
+        _chat_columns(conn)
+        conn.execute("DELETE FROM chat_messages WHERE session_id=?", (session_id,))
+        conn.execute("DELETE FROM chat_sessions WHERE id=?", (session_id,))
+
+
+def chat_messages(session_id: str, limit: int | None = None) -> list[dict[str, Any]]:
+    with connect() as conn:
+        _chat_columns(conn)
+        rows = conn.execute(
+            "SELECT * FROM chat_messages WHERE session_id=? ORDER BY created_at, rowid",
+            (session_id,),
+        ).fetchall()
+    items = [dict(row) for row in rows]
+    if limit and len(items) > limit:
+        items = items[-limit:]
+    return items
+
+
+def add_chat_message(session_id: str, role: str, content: str, **extra: Any) -> dict[str, Any]:
+    import uuid
+    message_id = f"msg:{uuid.uuid4().hex[:12]}"
+    allowed = {"input_mode", "asr_model", "asr_seconds", "asr_elapsed",
+               "llm_model", "elapsed", "error"}
+    values = {k: v for k, v in extra.items() if k in allowed}
+    stamp = now()
+    with _write_lock, connect() as conn:
+        _chat_columns(conn)
+        columns = ("id", "session_id", "role", "content", "created_at", *values)
+        conn.execute(
+            f"INSERT INTO chat_messages({','.join(columns)}) VALUES({','.join('?' for _ in columns)})",
+            (message_id, session_id, role, content, stamp, *values.values()),
+        )
+        conn.execute("UPDATE chat_sessions SET updated_at=? WHERE id=?", (stamp, session_id))
+    return {"id": message_id, "session_id": session_id, "role": role,
+            "content": content, "created_at": stamp, **values}
+
+
+def chat_turns(session_id: str, limit: int = 8) -> list[dict[str, str]]:
+    """Recent user/assistant pairs shaped for the LLM request."""
+    items = [m for m in chat_messages(session_id, limit=limit * 2)
+             if m["role"] in {"user", "assistant"} and not m.get("error")]
+    return [{"role": m["role"], "content": m["content"]} for m in items][-limit * 2:]

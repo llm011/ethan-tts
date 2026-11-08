@@ -20,6 +20,7 @@
       <div class="nav-label">管理</div>
       <button class="nav-item" data-view="tasks"><span>☷</span>任务队列 <i id="task-badge" hidden></i></button>
       <button class="nav-item" data-view="logs"><span>≡</span>运行日志</button>
+      <a class="nav-item" href="/chat"><span>◉</span>语音对话</a>
       <button class="nav-item" data-view="settings"><span>⚙</span>系统设置</button>
     </nav>
     <div class="sidebar-bottom">
@@ -98,36 +99,91 @@
 
       <!-- Settings -->
       <section id="view-settings" class="view">
-        <div class="page-heading"><div><div class="eyebrow">PREFERENCES</div><h1>按你的方式运行。</h1><p>所有设置与数据均保存在本地 SQLite。</p></div></div>
-        <div class="settings-grid"><div class="panel settings-panel"><h2>合成偏好</h2>
-          <div class="setting-row"><div><strong>默认发音人</strong><p>打开工作台时自动选择</p></div><select class="input" id="setting-voice"></select></div>
-          <div class="setting-row"><div><strong>最大文本长度</strong><p>100–2000 字，长文本会自动分句</p></div><div class="unit-input"><input type="number" class="input" id="setting-chars" min="100" max="2000"><span>字</span></div></div>
-          <div class="setting-row"><div><strong>单句长度</strong><p>20–200 字；短句更快返回首段音频</p></div><div class="unit-input"><input type="number" class="input" id="setting-sentence" min="20" max="200"><span>字</span></div></div>
-          <div class="setting-row"><div><strong>流式分块间隔</strong><p>0.16–2 秒，较小可更快开始播放</p></div><div class="unit-input"><input type="number" class="input" id="setting-interval" min=".16" max="2" step=".01"><span>秒</span></div></div>
-          <div class="setting-row"><div><strong>合成后自动播放</strong><p>保存完整 WAV 后立即播放</p></div><label class="switch"><input type="checkbox" id="setting-autoplay"><span></span></label></div>
-          <div class="settings-actions"><span class="muted" id="settings-status"></span><button class="button primary" id="save-settings">保存设置</button></div>
-        </div><div class="panel settings-panel"><h2>模型与资源</h2><p class="panel-description">默认仅加载 4bit 模型。可选模型不会自动下载。</p><div id="model-list"></div><button class="button secondary full" id="unload-models">释放模型内存</button><div class="resource-note">单任务队列 · 按需加载 · Metal 加速<br>停止服务后不会残留后台推理进程。</div></div></div>
-        <div class="panel settings-panel pronunciation-panel"><h2>读音纠正</h2><p class="panel-description">把模型容易读错的词换成你想要的读法，例如把 <code>Qwen</code> 读成「千问」。只改变合成时的发音，产物里仍保留原文。</p>
-          <form id="pron-form" class="pron-form">
-            <div class="pron-field"><label>原文 <span>必填</span></label><input class="input" id="pron-term" required maxlength="60" placeholder="Qwen"></div>
-            <div class="pron-arrow">→</div>
-            <div class="pron-field"><label>读作 <span>必填</span></label><input class="input" id="pron-say" required maxlength="120" placeholder="千问"></div>
-            <div class="pron-field"><label>备注 <span>可选</span></label><input class="input" id="pron-note" maxlength="200" placeholder="用于区分同类规则"></div>
-            <button class="button primary" type="submit" id="pron-add">＋ 添加</button>
-          </form>
-          <div class="pron-options"><label class="check"><input type="checkbox" id="pron-case"> 区分大小写</label><span class="muted">不勾选时 Qwen / qwen / QWEN 都会命中</span></div>
-          <div id="pron-list" class="pron-list"></div>
-          <div class="pron-preview">
-            <label class="field-label" for="pron-test">试一下效果 <span>不会真正合成</span></label>
-            <div class="pron-preview-row"><input class="input" id="pron-test" placeholder="输入一段包含 Qwen 的文本"><button class="button secondary" id="pron-preview-btn">预览</button></div>
-            <div class="pron-result" id="pron-result" hidden></div>
+        <div class="page-heading"><div><div class="eyebrow">PREFERENCES</div><h1>按你的方式运行。</h1><p>所有设置与数据均保存在本地 SQLite。</p></div><a class="button secondary" href="/chat">◉ 打开语音对话</a></div>
+        <div class="tabs" id="settings-tabs" role="tablist">
+          <button class="tab active" data-tab="general" role="tab">通用</button>
+          <button class="tab" data-tab="model" role="tab">模型设置</button>
+          <button class="tab" data-tab="speech" role="tab">语音识别</button>
+          <button class="tab" data-tab="pronunciation" role="tab">读音纠正</button>
+          <button class="tab" data-tab="resources" role="tab">模型与资源</button>
+        </div>
+
+        <div class="tab-panel active" data-panel="general">
+          <div class="settings-grid"><div class="panel settings-panel"><h2>合成偏好</h2>
+            <div class="setting-row"><div><strong>默认发音人</strong><p>打开工作台时自动选择</p></div><select class="input" id="setting-voice"></select></div>
+            <div class="setting-row"><div><strong>最大文本长度</strong><p>100–2000 字，长文本会自动分句</p></div><div class="unit-input"><input type="number" class="input" id="setting-chars" min="100" max="2000"><span>字</span></div></div>
+            <div class="setting-row"><div><strong>单句长度</strong><p>20–200 字；短句更快返回首段音频</p></div><div class="unit-input"><input type="number" class="input" id="setting-sentence" min="20" max="200"><span>字</span></div></div>
+            <div class="setting-row"><div><strong>流式分块间隔</strong><p>0.16–2 秒，较小可更快开始播放</p></div><div class="unit-input"><input type="number" class="input" id="setting-interval" min=".16" max="2" step=".01"><span>秒</span></div></div>
+            <div class="setting-row"><div><strong>合成后自动播放</strong><p>保存完整 WAV 后立即播放</p></div><label class="switch"><input type="checkbox" id="setting-autoplay"><span></span></label></div>
+            <div class="settings-actions"><span class="muted" id="settings-status"></span><button class="button primary" id="save-settings">保存设置</button></div>
+          </div><div class="panel settings-panel"><h2>语音对话</h2><p class="panel-description">对话页的朗读音色与断句节奏。对话模型在「模型设置」里配置。</p>
+            <div class="setting-row"><div><strong>朗读音色</strong><p>模型回答用这个声音读出来</p></div><select class="input" id="setting-chat-voice"></select></div>
+            <div class="setting-row"><div><strong>首句最短字数</strong><p>4–40 字；越小越早出声，但句子更碎</p></div><div class="unit-input"><input type="number" class="input" id="setting-first-chars" min="4" max="40"><span>字</span></div></div>
+            <div class="setting-row"><div><strong>最长分句</strong><p>20–200 字；超过就强制断开送 TTS</p></div><div class="unit-input"><input type="number" class="input" id="setting-tts-max" min="20" max="200"><span>字</span></div></div>
+            <div class="setting-row"><div><strong>朗读语速</strong><p>0.5–2.0×，保持音高</p></div><div class="unit-input"><input type="number" class="input" id="setting-speech-rate" min=".5" max="2" step=".05"><span>×</span></div></div>
+            <div class="setting-row"><div><strong>带入上下文</strong><p>最近几轮问答会一起发给模型</p></div><div class="unit-input"><input type="number" class="input" id="setting-history" min="0" max="40"><span>轮</span></div></div>
+            <div class="settings-actions"><span class="muted" id="chat-settings-status"></span><button class="button primary" id="save-chat-settings">保存对话设置</button></div>
+          </div></div>
+        </div>
+
+        <div class="tab-panel" data-panel="model">
+          <div class="settings-grid"><div class="panel settings-panel"><h2>对话模型</h2><p class="panel-description">任何兼容 OpenAI 接口的服务都可以：DeepSeek、OpenAI、智谱、通义、Kimi，或本机的 Ollama / LM Studio。</p>
+            <div class="preset-row" id="model-presets"></div>
+            <div class="setting-row stack"><div><strong>接口地址</strong><p>通常以 /v1 结尾，例如 https://api.deepseek.com/v1</p></div><input class="input" id="setting-base-url" placeholder="https://api.deepseek.com/v1" autocomplete="off"></div>
+            <div class="setting-row stack"><div><strong>API Key</strong><p id="api-key-hint">只保存在本地数据库，不会出现在页面上</p></div>
+              <div class="key-row"><input class="input" id="setting-api-key" type="password" placeholder="sk-…" autocomplete="off"><button class="text-button" id="toggle-key">显示</button><button class="text-button danger-text" id="clear-key">清除</button></div></div>
+            <div class="setting-row stack"><div><strong>模型名称</strong><p>例如 deepseek-chat、gpt-4o-mini、qwen2.5:7b</p></div>
+              <div class="key-row"><input class="input" id="setting-model" placeholder="deepseek-chat" autocomplete="off" list="model-options"><datalist id="model-options"></datalist><button class="button secondary small" id="fetch-models">读取列表</button></div></div>
+            <div class="setting-row"><div><strong>温度</strong><p>0–2；对话建议 0.5–0.8</p></div><div class="unit-input"><input type="number" class="input" id="setting-temperature" min="0" max="2" step=".1"></div></div>
+            <div class="setting-row"><div><strong>最大回复长度</strong><p>64–2048 tokens；语音对话不需要很长</p></div><div class="unit-input"><input type="number" class="input" id="setting-max-tokens" min="64" max="2048" step="16"></div></div>
+            <div class="settings-actions"><span class="muted" id="model-status"></span><button class="button secondary" id="test-model">测试连接</button><button class="button primary" id="save-model">保存模型设置</button></div>
+          </div><div class="panel settings-panel"><h2>回答风格</h2><p class="panel-description">这段 system prompt 决定模型怎么说话。语音对话最怕长段落，所以默认约束了长度、去掉了 Markdown，并要求数字口语化。</p>
+            <textarea class="input prompt-box" id="setting-system-prompt" rows="14" maxlength="4000"></textarea>
+            <div class="settings-actions"><span class="muted" id="prompt-status"></span><button class="text-button" id="reset-prompt">恢复默认</button><button class="button primary" id="save-prompt">保存提示词</button></div>
+          </div></div>
+        </div>
+
+        <div class="tab-panel" data-panel="speech">
+          <div class="panel settings-panel"><h2>语音识别</h2><p class="panel-description">把你说的话转成文字。两种模型都在本地运行，录音不会上传到任何服务器。</p>
+            <div id="asr-list" class="model-list-inline"></div>
+            <div class="setting-row"><div><strong>当前使用</strong><p>切换后会释放旧模型，下一次说话时加载新模型</p></div><select class="input" id="setting-asr-model"></select></div>
+            <div class="settings-actions"><span class="muted" id="asr-status"></span><button class="button primary" id="save-asr">保存</button></div>
+            <div class="resource-note">识别在按下说话并停顿后触发，一次只处理一小段录音；<br>热态下 0.6B 模型约 0.2 秒返回一句。</div>
+          </div>
+        </div>
+
+        <div class="tab-panel" data-panel="pronunciation">
+          <div class="panel settings-panel pronunciation-panel"><h2>读音纠正</h2><p class="panel-description">把模型容易读错的词换成你想要的读法，例如把 <code>Qwen</code> 读成「千问」。只改变合成时的发音，产物里仍保留原文。</p>
+            <form id="pron-form" class="pron-form">
+              <div class="pron-field"><label>原文 <span>必填</span></label><input class="input" id="pron-term" required maxlength="60" placeholder="Qwen"></div>
+              <div class="pron-arrow">→</div>
+              <div class="pron-field"><label>读作 <span>必填</span></label><input class="input" id="pron-say" required maxlength="120" placeholder="千问"></div>
+              <div class="pron-field"><label>备注 <span>可选</span></label><input class="input" id="pron-note" maxlength="200" placeholder="用于区分同类规则"></div>
+              <button class="button primary" type="submit" id="pron-add">＋ 添加</button>
+            </form>
+            <div class="pron-options"><label class="check"><input type="checkbox" id="pron-case"> 区分大小写</label><span class="muted">不勾选时 Qwen / qwen / QWEN 都会命中</span></div>
+            <div id="pron-list" class="pron-list"></div>
+            <div class="pron-preview">
+              <label class="field-label" for="pron-test">试一下效果 <span>不会真正合成</span></label>
+              <div class="pron-preview-row"><input class="input" id="pron-test" placeholder="输入一段包含 Qwen 的文本"><button class="button secondary" id="pron-preview-btn">预览</button></div>
+              <div class="pron-result" id="pron-result" hidden></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="tab-panel" data-panel="resources">
+          <div class="settings-grid"><div class="panel settings-panel"><h2>模型与资源</h2><p class="panel-description">默认仅加载 4bit 模型。可选模型不会自动下载。</p><div class="models-total" id="models-total"></div><div id="model-list"></div><button class="button secondary full" id="unload-models">释放模型内存</button><div class="resource-note">单任务队列 · 按需加载 · Metal 加速<br>停止服务后不会残留后台推理进程。</div></div>
+            <div class="panel settings-panel"><h2>手机访问</h2><p class="panel-description">同一个 Wi-Fi 下，用手机浏览器打开本机地址即可使用语音对话页。</p>
+              <div class="lan-address" id="lan-address">—</div>
+              <div class="resource-note">服务默认只监听 127.0.0.1。要让手机访问，用<br><code>python app.py --host 0.0.0.0</code> 启动。<br>语音页地址：<code>/chat</code>，可「添加到主屏幕」。</div>
+            </div>
           </div>
         </div>
       </section>
     </div>
   </main>
 </div>
-<div class="mobile-nav" id="mobile-nav"><button data-view="studio" class="active">⌁<span>合成</span></button><button data-view="voices">◉<span>音色</span></button><button data-view="artifacts">♫<span>产物</span></button><button data-view="tasks">☷<span>任务</span></button><button data-view="settings">⚙<span>设置</span></button></div>
+<div class="mobile-nav" id="mobile-nav"><button data-view="studio" class="active">⌁<span>合成</span></button><button data-view="voices">◉<span>音色</span></button><button data-view="artifacts">♫<span>产物</span></button><a href="/chat">◌<span>对话</span></a><button data-view="settings">⚙<span>设置</span></button></div>
 <div class="modal-backdrop" id="voice-modal" hidden><div class="modal"><div class="modal-head"><h2 id="voice-modal-title">新建音色</h2><button class="icon-button" id="close-voice-modal">×</button></div><form id="voice-form">
   <input type="hidden" id="edit-voice-id"><div class="form-group"><label>音色名称</label><input class="input" id="voice-name" required maxlength="40" placeholder="例如：温暖的中文旁白"></div>
   <div class="form-group" id="new-voice-type"><label>创建方式</label><div class="type-options"><label><input type="radio" name="voice-type" value="design" checked><span><b>✦ 文字设计</b><small>用一句话描述声音</small></span></label><label><input type="radio" name="voice-type" value="clone"><span><b>◉ 声音克隆</b><small>上传一段参考录音</small></span></label></div></div>

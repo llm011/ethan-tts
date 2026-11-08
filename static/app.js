@@ -1,6 +1,6 @@
 "use strict";
 const $ = id => document.getElementById(id);
-const state = { voices: [], models: [], settings: {}, artifacts: [], tasks: [], logs: [], pronunciations: [], current: "studio", lastArtifact: null, poll: null };
+const state = { voices: [], models: [], modelsByRole: {tts: [], asr: []}, settings: {}, chat: {}, artifacts: [], tasks: [], logs: [], pronunciations: [], current: "studio", lastArtifact: null, poll: null, settingsTab: "general" };
 const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmt = (n, digits=2) => Number(n || 0).toFixed(digits);
 const formatBytes = n => n < 1024 ? `${n} B` : n < 1048576 ? `${fmt(n/1024,1)} KB` : n < 1073741824 ? `${fmt(n/1048576,1)} MB` : `${fmt(n/1073741824,2)} GB`;
@@ -42,12 +42,12 @@ function navigate(view) {
   document.querySelectorAll(".view").forEach(el => el.classList.toggle("active", el.id === `view-${view}`));
   document.querySelectorAll("[data-view]").forEach(el => el.classList.toggle("active", el.dataset.view === view));
   $("breadcrumb").textContent = {studio:"语音合成",voices:"音色库",artifacts:"音频产物",tasks:"任务队列",logs:"运行日志",settings:"系统设置"}[view];
-  history.replaceState(null, "", `#${view}`);
+  history.replaceState(null, "", `#${view}${view === "settings" && state.settingsTab !== "general" ? "/" + state.settingsTab : ""}`);
   if (view === "voices") loadVoices();
   if (view === "artifacts") loadArtifacts();
   if (view === "tasks") loadTasks();
   if (view === "logs") loadLogs();
-  if (view === "settings") { renderSettings(); loadModels(); }
+  if (view === "settings") { renderSettings(); loadModels(); loadChatSettings(); }
 }
 document.querySelectorAll("[data-view]").forEach(el => el.addEventListener("click", () => navigate(el.dataset.view)));
 document.querySelectorAll("[data-nav]").forEach(el => el.addEventListener("click", () => navigate(el.dataset.nav)));
@@ -87,11 +87,13 @@ function renderVoiceOptions() {
   $("synth-voice").innerHTML = options; $("artifact-voice").innerHTML = '<option value="">全部音色</option>' + options; $("setting-voice").innerHTML = options;
   $("synth-voice").value = state.voices.some(v => v.id === selected) ? selected : state.voices[0]?.id;
   $("setting-voice").value = state.settings.default_voice_id;
+  const chatVoice=$("setting-chat-voice");
+  if(chatVoice&&state.chat.voice_id)chatVoice.value=state.chat.voice_id;
   updateSelectedVoice();
 }
 function requiredModel(voice) {
   const key = {custom:"custom-0.6b-4bit",design:"design-1.7b-4bit",clone:"base-0.6b-4bit"}[voice?.kind];
-  return state.models.find(m => m.key === key);
+  return state.modelsByRole.tts.find(m => m.key === key) || state.models.find(m => m.key === key);
 }
 function voiceReadiness(v) {
   if (v.kind === "custom") return "";
@@ -335,9 +337,34 @@ $("clear-logs").addEventListener("click",async()=>{if(confirm("确定清空全�
 
 function renderSettings(){const s=state.settings;if(!s.max_chars)return;$("setting-voice").value=s.default_voice_id;$("setting-chars").value=s.max_chars;$("setting-sentence").value=s.sentence_chars;$("setting-interval").value=s.streaming_interval;$("setting-autoplay").checked=s.autoplay;$("char-max").textContent=s.max_chars;$("synth-text").maxLength=s.max_chars;}
 $("save-settings").addEventListener("click",async()=>{setBusy("save-settings",true);try{state.settings=await api("/api/settings",{method:"PATCH",body:JSON.stringify({default_voice_id:$("setting-voice").value,max_chars:Number($("setting-chars").value),sentence_chars:Number($("setting-sentence").value),streaming_interval:Number($("setting-interval").value),autoplay:$("setting-autoplay").checked})});renderSettings();$("settings-status").textContent="设置已保存";toast("设置已保存");}catch(e){toast(e.message,true);}finally{setBusy("save-settings",false);}});
-async function loadModels(){try{const data=await api("/api/models");state.models=data.items;updateSelectedVoice();$("model-list").innerHTML=data.items.map(m=>`<div class="model-item"><div class="model-item-title"><span>${esc(m.name)}</span><span class="tag ${m.installed?"installed":""}">${m.loaded?"运行中":m.installed?"已下载":"未下载"}</span></div><p>${esc(m.description)}</p>${m.installed?"":`<button class="button secondary" data-download-model="${m.key}">下载模型 ↗</button>`}</div>`).join("");}catch(e){toast(e.message,true);}}
+async function loadModels(){
+  try{
+    const data=await api("/api/models");
+    state.models=data.items;
+    state.modelsByRole={tts:data.items.filter(m=>m.role==="tts"),asr:data.items.filter(m=>m.role==="asr")};
+    updateSelectedVoice();
+    const size=m=>m.size_label?`<span class="model-size">${esc(m.size_label)}</span>`:"";
+    const card=m=>`<div class="model-item"><div class="model-item-title"><span>${esc(m.name)}${size(m)}</span><span class="tag ${m.installed?"installed":""}">${m.loaded?"运行中":m.installed?"已下载":"未下载"}</span></div><p>${esc(m.description)}</p>${m.installed?"":`<button class="button secondary" data-download-model="${m.key}">下载模型 ↗${m.size_label?` · ${esc(m.size_label)}`:""}</button>`}</div>`;
+    $("model-list").innerHTML=state.modelsByRole.tts.map(card).join("");
+    const asrList=$("asr-list");
+    if(asrList){
+      asrList.innerHTML=state.modelsByRole.asr.map(m=>`<div class="asr-card${m.key===state.chat.asr_model?" active":""}">
+        <strong>${esc(m.name)}${m.size_label?`<span class="model-size">${esc(m.size_label)}</span>`:""}</strong><p>${esc(m.description)}</p>
+        <span class="tag ${m.installed?"installed":""}">${m.loaded?"运行中":m.installed?"已下载":"未下载"}</span>
+        ${m.installed?"":`<button class="text-button" data-download-model="${m.key}">下载 ↗${m.size_label?` · ${esc(m.size_label)}`:""}</button>`}</div>`).join("");
+      const select=$("setting-asr-model");
+      if(select) select.innerHTML=state.modelsByRole.asr.map(m=>`<option value="${esc(m.key)}">${esc(m.name)}${m.installed?"":"（未下载）"}</option>`).join("");
+      const total=$("models-total");
+      if(total){
+        const used=state.models.filter(m=>m.installed).reduce((sum,m)=>sum+(m.size_bytes||0),0);
+        total.textContent=used?`已下载 ${state.models.filter(m=>m.installed).length} 个 · 占用 ${formatBytes(used)}`:"";
+      }
+      if(select&&state.chat.asr_model) select.value=state.chat.asr_model;
+    }
+  }catch(e){toast(e.message,true);}
+}
 async function startModelDownload(key,button,showLogs=false){button.disabled=true;const old=button.textContent;button.textContent="下载中…";try{const r=await api("/api/models/download",{method:"POST",body:JSON.stringify({model_key:key})});toast(r.message);if(showLogs)navigate("logs");}catch(e){toast(e.message,true);button.disabled=false;button.textContent=old;}}
-$("model-list").addEventListener("click",e=>{const b=e.target.closest("[data-download-model]");if(b)startModelDownload(b.dataset.downloadModel,b,true);});
+["model-list","asr-list"].forEach(id=>{const el=$(id);if(el)el.addEventListener("click",e=>{const b=e.target.closest("[data-download-model]");if(b)startModelDownload(b.dataset.downloadModel,b,true);});});
 $("required-model-btn").addEventListener("click",e=>startModelDownload(e.currentTarget.dataset.modelKey,e.currentTarget));
 $("unload-models").addEventListener("click",async()=>{if(!confirm("释放模型内存？下次合成会重新加载模型。"))return;try{await api("/api/models/unload",{method:"POST"});toast("模型内存已释放");loadModels();loadOverview();}catch(e){toast(e.message,true);}});
 
@@ -444,13 +471,201 @@ async function init(){
   // Switch the view first so the active tab and content match the URL
   // immediately; data loading must not gate the initial paint.
   applyTheme(localStorage.getItem("ethan-tts-theme")||"light");
-  navigate(location.hash.slice(1)||"studio");
+  const [hashView, hashTab] = location.hash.slice(1).split("/");
+  navigate(hashView||"studio");
+  if (hashView === "settings" && hashTab) showSettingsTab(hashTab);
   try{
     state.settings=await api("/api/settings");
     applyTheme(localStorage.getItem("ethan-tts-theme")||state.settings.theme);
     await loadVoices();renderSettings();updateCount();await loadOverview();await loadPronunciations();
+    await loadChatSettings();await loadModels();loadLanAddress();
     navigate(state.current);
+    if (state.current === "settings" && hashTab) showSettingsTab(hashTab);
     state.poll=setInterval(()=>{loadOverview();if(state.current==="tasks")loadTasks();if(state.current==="settings")loadModels();},5000);
   }catch(e){toast(`初始化失败：${e.message}`,true);}
 }
 init();
+
+// ------------------------------------------------------------------ chat settings
+// The settings page owns the model configuration: without it the voice chat
+// page has nothing to talk to. Everything here is a PATCH to /api/chat/settings,
+// so a save is atomic and the page can re-read the masked key state.
+
+function showSettingsTab(name) {
+  state.settingsTab = name;
+  document.querySelectorAll(".tab").forEach(el => el.classList.toggle("active", el.dataset.tab === name));
+  document.querySelectorAll(".tab-panel").forEach(el => el.classList.toggle("active", el.dataset.panel === name));
+  if (state.current === "settings") {
+    history.replaceState(null, "", `#settings${name === "general" ? "" : "/" + name}`);
+  }
+  if (name === "speech" || name === "resources") loadModels();
+  if (name === "general") loadChatSettings();
+}
+
+document.querySelectorAll(".tab").forEach(el =>
+  el.addEventListener("click", () => showSettingsTab(el.dataset.tab)));
+
+async function loadChatSettings() {
+  try {
+    const [data, bootstrap] = await Promise.all([
+      api("/api/chat/settings"),
+      state.defaultPrompt === undefined || !state.presets ? api("/api/chat/bootstrap") : Promise.resolve(null),
+    ]);
+    state.chat = data;
+    if (bootstrap) {
+      state.presets = bootstrap.presets;
+      state.defaultPrompt = bootstrap.default_prompt;
+      const asr = bootstrap.models.asr || [];
+      const select = $("setting-asr-model");
+      if (select && !select.options.length) {
+        select.innerHTML = asr.map(m => `<option value="${esc(m.key)}">${esc(m.name)}${m.installed ? "" : "（未下载）"}</option>`).join("");
+      }
+    }
+    renderChatSettings();
+  } catch (e) { console.debug(e); }
+}
+
+function renderChatSettings() {
+  const c = state.chat;
+  if (!c || typeof c.llm_base_url !== "string") return;
+  if ($("setting-base-url")) $("setting-base-url").value = c.llm_base_url || "";
+  if ($("setting-model")) $("setting-model").value = c.llm_model || "";
+  if ($("setting-temperature")) $("setting-temperature").value = c.llm_temperature ?? .7;
+  if ($("setting-max-tokens")) $("setting-max-tokens").value = c.llm_max_tokens ?? 320;
+  if ($("setting-system-prompt")) $("setting-system-prompt").value = c.system_prompt || state.defaultPrompt || "";
+  if ($("setting-first-chars")) $("setting-first-chars").value = c.tts_first_chars ?? 8;
+  if ($("setting-tts-max")) $("setting-tts-max").value = c.tts_max_chars ?? 60;
+  if ($("setting-speech-rate")) $("setting-speech-rate").value = c.speech_rate ?? 1;
+  if ($("setting-history")) $("setting-history").value = c.history_turns ?? 8;
+  if ($("setting-asr-model") && c.asr_model) $("setting-asr-model").value = c.asr_model;
+  if ($("api-key-hint")) {
+    $("api-key-hint").textContent = c.has_api_key
+      ? "已保存一个 Key；留空表示不修改，点「清除」可删除"
+      : "只保存在本地数据库，不会出现在页面上";
+  }
+  const chatVoice = $("setting-chat-voice");
+  if (chatVoice) {
+    const options = state.voices.map(v => `<option value="${esc(v.id)}">${esc(v.name)} · ${kindNames[v.kind]}</option>`).join("");
+    chatVoice.innerHTML = options;
+    if (c.voice_id) chatVoice.value = c.voice_id;
+  }
+  const presets = $("model-presets");
+  if (presets) {
+    presets.innerHTML = (state.presets || []).map(p =>
+      `<button class="preset-chip" data-preset="${esc(p.base_url)}|${esc(p.model)}">${esc(p.label)}</button>`).join("");
+  }
+}
+
+async function saveChatPatch(payload, statusEl, message = "已保存") {
+  try {
+    state.chat = await api("/api/chat/settings", { method: "PATCH", body: JSON.stringify(payload) });
+    renderChatSettings();
+    if (statusEl) { statusEl.textContent = message; setTimeout(() => statusEl.textContent = "", 2400); }
+    toast(message);
+    return true;
+  } catch (e) { toast(e.message, true); return false; }
+}
+
+function modelPayload() {
+  const payload = {
+    llm_base_url: $("setting-base-url").value.trim(),
+    llm_model: $("setting-model").value.trim(),
+    llm_temperature: Number($("setting-temperature").value),
+    llm_max_tokens: Number($("setting-max-tokens").value),
+  };
+  const key = $("setting-api-key").value.trim();
+  if (key) payload.llm_api_key = key;
+  return payload;
+}
+
+$("save-model").addEventListener("click", async () => {
+  const ok = await saveChatPatch(modelPayload(), $("model-status"), "模型设置已保存");
+  if (ok) $("setting-api-key").value = "";
+});
+
+$("test-model").addEventListener("click", async () => {
+  setBusy("test-model", true, "测试中…");
+  $("model-status").textContent = "";
+  try {
+    const result = await api("/api/chat/settings/test", {
+      method: "POST",
+      body: JSON.stringify({
+        base_url: $("setting-base-url").value.trim(),
+        api_key: $("setting-api-key").value.trim(),
+        model: $("setting-model").value.trim(),
+      }),
+    });
+    $("model-status").textContent = `连接成功 · ${result.seconds}s · 返回「${result.reply}」`;
+    toast("模型连接正常");
+  } catch (e) {
+    $("model-status").textContent = e.message;
+    toast(e.message, true);
+  } finally { setBusy("test-model", false); }
+});
+
+$("fetch-models").addEventListener("click", async () => {
+  const base = $("setting-base-url").value.trim();
+  if (!base) return toast("先填接口地址", true);
+  setBusy("fetch-models", true, "读取中…");
+  try {
+    const params = new URLSearchParams({ base_url: base, api_key: $("setting-api-key").value.trim() });
+    const data = await api(`/api/chat/settings/models?${params}`);
+    $("model-options").innerHTML = data.items.map(id => `<option value="${esc(id)}"></option>`).join("");
+    toast(data.items.length ? `找到 ${data.items.length} 个模型，点输入框可选` : "该服务没有返回模型列表");
+  } catch (e) { toast(e.message, true); }
+  finally { setBusy("fetch-models", false); }
+});
+
+$("model-presets").addEventListener("click", e => {
+  const chip = e.target.closest("[data-preset]");
+  if (!chip) return;
+  const [base, model] = chip.dataset.preset.split("|");
+  $("setting-base-url").value = base;
+  $("setting-model").value = model;
+});
+
+$("toggle-key").addEventListener("click", () => {
+  const input = $("setting-api-key");
+  input.type = input.type === "password" ? "text" : "password";
+  $("toggle-key").textContent = input.type === "password" ? "显示" : "隐藏";
+});
+
+$("clear-key").addEventListener("click", async () => {
+  if (!confirm("清除已保存的 API Key？")) return;
+  $("setting-api-key").value = "";
+  await saveChatPatch({ llm_api_key: "__clear__" }, $("model-status"), "API Key 已清除");
+});
+
+$("save-prompt").addEventListener("click", () =>
+  saveChatPatch({ system_prompt: $("setting-system-prompt").value }, $("prompt-status"), "提示词已保存"));
+
+$("reset-prompt").addEventListener("click", async () => {
+  if (!confirm("恢复默认的语音对话提示词？")) return;
+  if (!state.defaultPrompt) {
+    const data = await api("/api/chat/bootstrap");
+    state.defaultPrompt = data.default_prompt;
+  }
+  $("setting-system-prompt").value = state.defaultPrompt;
+  toast("已填入默认提示词，记得保存");
+});
+
+$("save-chat-settings").addEventListener("click", () =>
+  saveChatPatch({
+    voice_id: $("setting-chat-voice").value,
+    tts_first_chars: Number($("setting-first-chars").value),
+    tts_max_chars: Number($("setting-tts-max").value),
+    speech_rate: Number($("setting-speech-rate").value),
+    history_turns: Number($("setting-history").value),
+  }, $("chat-settings-status"), "对话设置已保存"));
+
+$("save-asr").addEventListener("click", async () => {
+  const ok = await saveChatPatch({ asr_model: $("setting-asr-model").value }, $("asr-status"), "语音识别模型已保存");
+  if (ok) loadModels();
+});
+
+async function loadLanAddress() {
+  try {
+    const data = await api("/api/network");
+    $("lan-address").textContent = data.urls.length ? data.urls.join("  ·  ") + "/chat" : "未检测到局域网地址";
+  } catch (_) { $("lan-address").textContent = "—"; }
+}

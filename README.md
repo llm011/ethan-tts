@@ -13,8 +13,85 @@
 - **运行日志**：按级别、模块、关键词与任务筛选，查看结构化错误和模型下载记录，可清空。
 - **设置与资源**：默认发音人、文本长度、切句长度、流式间隔、自动播放、模型按需下载、主动释放内存。
 - **读音纠正**：自定义替换词典，把模型读错的词换成想要的读法（如 `Qwen` → 「千问」）；支持大小写敏感、逐条启停、命中计数与试听前预览。
+- **语音对话**（`/chat`）：说话 → 本地识别 → 流式模型回答 → 边生成边朗读。三阶段并行，模型吐出第一句就立刻合成，不等整段回答。
+- **对话记录**：每轮问答（含识别文本、模型、耗时）存进 SQLite，左侧可切换/重命名/删除历史对话，回来后自动带上上下文。
+- **设置多 Tab**：通用 / 模型设置 / 语音识别 / 读音纠正 / 模型与资源；模型设置里可测试连接、读取模型列表、一键套用常见服务商。
 - **API**：FastAPI 提供完整 HTTP 接口；启动后可打开 `http://127.0.0.1:8765/docs`。
 - **CLI**：面向 agent 与脚本的 `ethan-tts` 命令，支持合成、克隆、音色/产物/模型/日志管理，全部命令可输出 JSON。
+
+## 语音对话
+
+打开 **<http://127.0.0.1:8765/chat>**（手机用局域网地址，见下文）。第一次会提示还没配置模型，点提示里的链接跳到设置页的「模型设置」填三项：接口地址、API Key、模型名称。任何兼容 OpenAI `/chat/completions` 的服务都行——DeepSeek、OpenAI、智谱、通义、Kimi，或本机的 Ollama / LM Studio。填完点「测试连接」，通过后回到对话页就能说话。
+
+### 一轮对话是怎么跑起来的
+
+```text
+按住说话 ──► VAD 检测停顿 ──► 录音上传
+                                │
+                     Qwen3-ASR 本地识别（热态约 0.2s）
+                                │
+                     模型流式输出，按标点切句
+                          │              │
+                  第 1 句进 TTS    第 2 句继续流式生成
+                          │              │
+                    PCM 边合成边播放 ◄────┘
+```
+
+三件事同时进行，所以**首句出声**和**整段说完**是两个时间。实测（M4 / 24GB，DeepSeek + 0.6B TTS）：
+
+| 指标 | 热态 |
+| --- | ---: |
+| 识别一句话 | 约 **0.2 秒** |
+| 第一句切好（模型刚吐完第一句） | 约 **0.5 秒** |
+| 首句音频开始播放 | 约 **1.0 秒** |
+| 三句话全部说完 | 约 **6.6 秒** |
+
+冷启动要多等一次模型加载（TTS 约 7 秒、ASR 约 1–2 秒），之后常驻。
+
+### 为什么 system prompt 这样写
+
+正常聊天模型的回答直接朗读会很难听：一段三四百字的 Markdown 念完要一分钟，列表符号、加粗星号、括号注释都会被念出来。默认提示词因此按优先级约束：
+
+1. **先限长度**：1–3 句、一般不超过 80 字，只有用户要求展开才多说；
+2. **只输出可朗读文本**：禁 Markdown、列表、代码块、链接、表情、括注；
+3. **数字口语化**：「下午三点」而不是「15:00」，「百分之二十」而不是「20%」；
+4. **先结论后追问**：多步问题先给结论，再问要不要继续；
+5. **不确定就说不确定**，不编造。
+
+设置页「模型设置 → 回答风格」里可以改，也能一键恢复默认。后端还会再兜一层：送给 TTS 前剥掉 Markdown、表情和多余符号，避免模型没听话时把「星号星号」念出来。
+
+### 语音识别用什么
+
+两种都在本机 MLX 上跑，录音不出机器：
+
+| 模型 | 体积 | 热态耗时 | 适合 |
+| --- | ---: | ---: | --- |
+| **Qwen3-ASR 0.6B 4bit**（默认） | 713 MB | **0.2 秒** | 中英日韩多语种，短句准、延迟低 |
+| Whisper large-v3 turbo 4bit | 469 MB | 1.65 秒 | 有口音或嘈杂环境更稳 |
+
+在「设置 → 语音识别」切换。没考虑的方案：`faster-whisper` 在 Apple Silicon 只有 CPU 且会和 Metal 抢资源；Apple `Speech.framework` 要写 Swift 桥接且中文切句不可控；云端 ASR 与「本地运行」定位冲突。
+
+```bash
+.venv/bin/python download_model.py --role asr        # 下载两个识别模型
+.venv/bin/python download_model.py --model qwen3-asr-0.6b-4bit
+```
+
+### 手机上用
+
+同一个 Wi-Fi 下让手机打开即可：
+
+```bash
+.venv/bin/python app.py --host 0.0.0.0
+# 页面里「设置 → 模型与资源 → 手机访问」会显示实际地址，形如 http://10.0.0.5:8765/chat
+```
+
+`/chat` 是独立的 H5 页面：响应式布局、抽屉式对话历史、底部输入栏、刘海与 Home 指示条安全区适配，iOS Safari 里可「添加到主屏幕」全屏打开。手机上是**点一下开始、再点一下发送**（长按会和浏览器手势冲突），电脑上是按住说话；停顿 1.2 秒也会自动发送。
+
+> 用 `--host 0.0.0.0` 会把服务暴露给同网段的设备，且目前没有登录认证。只在可信网络里这么用，不要映射到公网。
+
+### 打断
+
+说话过程中再点一下麦克风（或点顶栏的 ■）就中断：后端立刻停掉模型请求和排队中的合成，**已经朗读出来的部分仍会存进对话记录**，不会白说。
 
 ## 实测性能
 
@@ -128,6 +205,10 @@ ethan-tts clone --audio my.m4a --text "录音里说的原话" --name 我的声�
 # 用文字描述创建音色（需先下载 VoiceDesign 模型）
 ethan-tts design --name 深夜电台 --instruct "成熟温柔的女声，语速偏慢"
 
+# 语音对话（一轮问答，返回文字 + 可选的朗读 WAV）
+ethan-tts chat --text "介绍一下杭州"
+ethan-tts chat turn.wav -o reply.wav --json
+
 # 管理与排查
 ethan-tts voices list --json
 ethan-tts artifacts list
@@ -212,6 +293,26 @@ ethan-tts pronounce rm Qwen
 - **想暂停流式试听**：点「❚❚ 暂停」挂起播放（后台仍在继续生成），「▶ 继续」接着播，暂停期间不会丢音频；「■ 停止」直接中止这次试听。
 - **要调语速**：优先用 0.85×–1.3× 区间，超出后母音与呼吸节奏会开始失真；语速是生成后处理，**不增加模型耗时**，但需要 `ffmpeg`。
 
+## 对话 API
+
+```bash
+# 一轮对话，SSE 流：status / asr / user / sentence / audio / pause / done / error
+curl -N -X POST http://127.0.0.1:8765/api/chat/turn \
+  -F session_id=chat:xxxx -F transcript='你好' --output turn.txt
+
+# 上传录音（16 kHz 单声道 WAV），由服务端识别
+curl -N -X POST http://127.0.0.1:8765/api/chat/turn \
+  -F session_id=chat:xxxx -F audio=@turn.wav --output turn.txt
+
+curl http://127.0.0.1:8765/api/chat/sessions
+curl http://127.0.0.1:8765/api/chat/sessions/chat:xxxx
+curl -X PATCH http://127.0.0.1:8765/api/chat/settings \
+  -H 'Content-Type: application/json' \
+  -d '{"llm_base_url":"https://api.deepseek.com/v1","llm_model":"deepseek-chat","llm_api_key":"sk-..."}'
+```
+
+`audio` 事件里的 `pcm` 是 base64 的 PCM16 单声道，采样率见同事件的 `rate` 字段（当前 24000），前端直接排进 Web Audio 时间线。
+
 ## API 示例
 
 ```bash
@@ -246,6 +347,8 @@ models/               # 权重，Git 忽略
 data/ethan_tts.db     # 音色、设置、任务、产物元数据和结构化日志
 data/artifacts/       # 生成的 WAV
 data/voices/          # 用户上传并转码的参考录音
+# 对话记录存在 data/ethan_tts.db 的 chat_sessions / chat_messages 表
+# API Key 也在同一个库里，明文保存；这个库不要提交、不要同步到公共位置
 ```
 
 删除 `data/` 会清空个人设置、音色、任务、日志与生成音频；请先备份需要的内容。`models/` 可独立删除并重新下载。
@@ -265,11 +368,14 @@ node --check static/app.js             # 如果本机安装了 Node.js
 ```text
 app.py                # HTTP API、请求校验与生命周期
 engine.py             # 模型管理、单并发推理、切句、PCM/WAV、后台队列
-db.py                 # SQLite 持久化
-config.py             # 模型目录、默认音色与设置
-static/               # 中文管理台（合成/音色/产物/任务/日志/设置）
+stt.py                # 本地语音识别（Qwen3-ASR / Whisper），单模型常驻
+llm.py                # OpenAI 兼容的流式客户端，错误信息面向用户
+chat.py               # 对话编排：ASR → 流式 LLM → 分句 → 逐句 TTS
+db.py                 # SQLite 持久化（含对话会话与消息）
+config.py             # 模型注册表、默认音色、对话与提示词默认值
+static/               # 中文管理台 + /chat 语音对话页
 download_model.py     # 可断点续传的模型下载器
-tests/                # 使用假引擎的快速测试
+tests/                # 使用假引擎/假模型的快速测试
 ```
 
 ## 许可与致谢
