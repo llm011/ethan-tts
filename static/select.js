@@ -88,6 +88,7 @@
       label.textContent = empty
         ? (select.dataset.placeholder || "暂无可选项")
         : (opt ? opt.textContent.trim() : "");
+      trigger.title = label.textContent;
       label.classList.toggle("cs-placeholder", empty || !select.value);
       trigger.disabled = select.disabled || empty;
       wrap.classList.toggle("cs-disabled", select.disabled);
@@ -103,8 +104,11 @@
         row.className = "cs-option";
         row.setAttribute("role", "option");
         row.dataset.value = opt.value;
+        const full = opt.textContent.trim();
         const text = document.createElement("span");
-        text.textContent = opt.textContent.trim();
+        text.textContent = full;
+        // Truncated options still need a way to read the whole name.
+        row.title = full;
         row.append(text);
         if (opt.value === select.value) {
           row.classList.add("cs-selected");
