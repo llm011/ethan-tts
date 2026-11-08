@@ -49,6 +49,8 @@ DB_PATH = DATA_DIR / "ethan_tts.db"
 ARTIFACT_DIR = DATA_DIR / "artifacts"
 VOICE_DIR = DATA_DIR / "voices"
 LOG_DIR = DATA_DIR / "logs"
+# 单实例锁：服务启动时独占，防止并发 CLI 各自 Popen 出多个 app.py。
+PID_FILE = DATA_DIR / "server.pid"
 MODEL_DIR = _pick("models", "ETHAN_TTS_MODEL_DIR", ROOT / "models")
 
 for directory in (DATA_DIR, ARTIFACT_DIR, VOICE_DIR, LOG_DIR):

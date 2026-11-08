@@ -309,6 +309,22 @@ def update_task(task_id: str, **values: Any) -> None:
         db.execute(f"UPDATE tasks SET {sql} WHERE id=?", (*values.values(), task_id))
 
 
+def reap_orphan_tasks() -> int:
+    """把上次进程留下的 running/queued 任务标成 interrupted，返回处理条数。
+
+    进程被 kill -9 或机器重启时，正在跑的任务状态会永远停在 running：
+    队列没了推进者，前端和 CLI 却以为它还在跑。启动时统一收尾即可。
+    """
+    with _write_lock, connect() as db:
+        cursor = db.execute(
+            "UPDATE tasks SET status='interrupted', finished_at=?, "
+            "error=COALESCE(NULLIF(error,''), '服务重启，任务被中断') "
+            "WHERE status IN ('running','queued')",
+            (now(),),
+        )
+        return cursor.rowcount or 0
+
+
 def add_artifact(data: dict[str, Any]) -> dict[str, Any]:
     with _write_lock, connect() as db:
         columns = list(data)
