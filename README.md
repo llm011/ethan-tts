@@ -148,7 +148,24 @@ Qwen3-TTS 每段独立生成时，首尾各带约 **300 ms** 静音。早期版�
 - Apple Silicon Mac（M1 及更新），建议 16 GB 及以上统一内存；开发测试机为 24 GB。
 - Python **3.10–3.12**，推荐 3.12。MLX 不支持 Intel Mac。
 - 安装 [uv](https://docs.astral.sh/uv/)（推荐）和 `ffmpeg`（仅克隆录音转码需要）。
-- 默认模型下载约 **1.6 GB**，准备约 3 GB 空闲空间。可选模型需要额外磁盘与内存。
+- 默认模型下载约 **1.7 GB**（实测），准备约 3 GB 空闲空间。可选模型需要额外磁盘与内存：1.7B VoiceDesign 约 2.3 GB，Base 克隆模型约 1.7 GB。
+
+**一条命令装好**（推荐）：装成独立命令行工具，不污染系统 Python。
+
+```bash
+uv tool install --python 3.12 "git+https://github.com/llm011/ethan-tts.git"
+ethan-tts setup        # 检查环境 → 询问是否下载默认模型 → 顺手把服务起起来
+```
+
+`setup` 会把该装的东西补齐并告诉你下一步该干嘛；跳过下载用 `ethan-tts setup --no-serve`，全自动用 `-y`。之后想确认哪里不对劲，直接：
+
+```bash
+ethan-tts doctor       # 平台 / Python / 依赖 / 安装位置 / 数据目录 / 模型 / 服务 / ffmpeg / 播放器 / PATH
+```
+
+有问题它会直接给出修复命令。模型、数据都放在 `~/Library/Application Support/ethan-tts/`，和源码目录彻底分开，升级或重装不会丢——老版本留在源码旁的 `models/` 也会被自动复用。
+
+**从源码跑**：
 
 ```bash
 # 1. 创建隔离环境，不修改系统 Python
@@ -215,6 +232,8 @@ ethan-tts artifacts list
 ethan-tts artifacts get <id> -o copy.wav
 ethan-tts models list
 ethan-tts logs --level ERROR
+ethan-tts setup            # 首次安装自检 + 下载模型
+ethan-tts doctor           # 体检，出问题会给出修复命令
 ethan-tts status --json
 ethan-tts serve            # 后台启动服务
 ethan-tts stop             # 停止服务

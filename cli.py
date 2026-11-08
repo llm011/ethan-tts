@@ -13,6 +13,7 @@ Every command supports --json for machine-readable output.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import shutil
@@ -22,8 +23,13 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import wave
 from pathlib import Path
 from typing import Any
+
+# setup / doctor 必须能在依赖坏掉时仍然跑起来，所以它们不 import engine，
+# 也就不能塞进这个已经依赖 httpx 的模块里。
+from setup_cmd import cmd_doctor, cmd_setup
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_URL = os.environ.get("ETHAN_TTS_URL", "http://127.0.0.1:8765")
@@ -416,6 +422,91 @@ def cmd_logs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_chat(args: argparse.Namespace) -> int:
+    """One spoken turn through the same SSE endpoint the web page uses."""
+    ensure_server(args.base, getattr(args, "autostart", True))
+    text = args.text
+    audio_bytes = None
+    if text is None:
+        if args.audio:
+            audio_bytes = Path(args.audio).read_bytes()
+        elif not sys.stdin.isatty():
+            text = sys.stdin.read().strip()
+        else:
+            print("错误：需要录音文件或 --text", file=sys.stderr)
+            return 2
+
+    if args.voice:
+        voices = request("/api/voices", base=args.base)["items"]
+        match = next((v for v in voices if args.voice in {v["id"], v["name"]}), None)
+        if not match:
+            raise ApiError(f"找不到音色：{args.voice}")
+        request("/api/chat/settings", "PATCH", {"voice_id": match["id"]}, base=args.base)
+
+    session_id = args.session
+    if not session_id:
+        session_id = request("/api/chat/sessions", "POST", {"title": "命令行对话"},
+                             base=args.base)["id"]
+
+    # Multipart so the recording path and the text path share one endpoint.
+    boundary = "----ethan-tts-chat"
+    parts: list[bytes] = []
+    def field(name: str, value: str) -> None:
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
+    field("session_id", session_id)
+    if text is not None:
+        field("transcript", text)
+    if audio_bytes is not None:
+        parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="audio"; '
+                      f'filename="turn.wav"\r\nContent-Type: audio/wav\r\n\r\n').encode()
+                     + audio_bytes + b"\r\n")
+    body = b"".join(parts) + f"--{boundary}--\r\n".encode()
+
+    req = urllib.request.Request(
+        (args.base or DEFAULT_URL).rstrip("/") + "/api/chat/turn", data=body, method="POST",
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                 "Accept": "text/event-stream"},
+    )
+    transcript, reply, audio = "", [], bytearray()
+    try:
+        with urllib.request.urlopen(req, timeout=300) as response:
+            for raw in response:
+                line = raw.decode("utf-8", "replace").strip()
+                if line.startswith("event:"):
+                    event = line.split(":", 1)[1].strip()
+                elif line.startswith("data:"):
+                    data = json.loads(line.split(":", 1)[1])
+                    if event == "asr":
+                        transcript = data["text"]
+                    elif event == "sentence":
+                        reply.append(data["text"])
+                    elif event == "audio":
+                        audio += base64.b64decode(data["pcm"])
+                    elif event == "error":
+                        raise ApiError(data["message"])
+    except urllib.error.HTTPError as exc:
+        raise ApiError(exc.read().decode(errors="replace")[:400], exc.code) from exc
+
+    text_reply = "".join(reply).strip()
+    path = None
+    if audio and not args.no_speak:
+        path = Path(args.output) if args.output else Path(f"reply-{session_id.split(':')[-1]}.wav")
+        with wave.open(str(path), "wb") as wav:
+            wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(24000)
+            wav.writeframes(bytes(audio))
+    if args.json:
+        print(json.dumps({"ok": True, "session": session_id, "transcript": transcript,
+                          "reply": text_reply, "audio": str(path) if path else None},
+                         ensure_ascii=False))
+    else:
+        if transcript:
+            print(f"你说：{transcript}")
+        print(f"回答：{text_reply}")
+        if path:
+            print(f"音频：{path}")
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     up = is_up(args.base)
     payload: dict[str, Any] = {"url": args.base, "server_running": up}
@@ -563,6 +654,29 @@ def build_parser() -> argparse.ArgumentParser:
     pprev = pron_sub.add_parser("preview", parents=[common])
     pprev.add_argument("text", nargs="?", default="-")
     pprev.set_defaults(func=cmd_pronounce, action="preview")
+
+    chat = sub.add_parser("chat", help="语音对话：说话、转录、让模型回答", parents=[common])
+    chat.add_argument("audio", nargs="?", help="录音文件（wav/m4a/mp3）；省略则从 stdin 读文本")
+    chat.add_argument("--text", help="直接给文本，跳过语音识别")
+    chat.add_argument("--session", help="继续某个对话 ID")
+    chat.add_argument("--voice", help="朗读音色名称或 ID")
+    chat.add_argument("--no-speak", action="store_true", help="只取回答，不朗读")
+    chat.add_argument("-o", "--output", help="把朗读音频存成 WAV")
+    chat.set_defaults(func=cmd_chat)
+
+    setup = sub.add_parser("setup", parents=[common],
+                           help="首次安装自检：检查环境并下载默认模型")
+    setup.add_argument("--download", action="store_true",
+                       help="直接下载默认模型，不再询问")
+    setup.add_argument("--yes", "-y", action="store_true",
+                       help="对所有询问一律同意（等价于 --download）")
+    setup.add_argument("--no-serve", action="store_true",
+                       help="配好后不要顺手启动服务")
+    setup.set_defaults(func=cmd_setup)
+
+    doctor = sub.add_parser("doctor", parents=[common],
+                            help="体检：环境、依赖、模型、服务是否正常")
+    doctor.set_defaults(func=cmd_doctor)
 
     status = sub.add_parser("status", help="查看服务与资源状态", parents=[common])
     status.set_defaults(func=cmd_status)
