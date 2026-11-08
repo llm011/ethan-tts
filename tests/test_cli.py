@@ -116,3 +116,33 @@ def test_parser_accepts_common_agent_flags():
     ])
     assert args.json is True and args.autostart is False
     assert args.voice == "薇薇安" and args.out == "a.wav"
+
+
+def test_startup_guard_serializes_concurrent_spawn(tmp_path, monkeypatch):
+    """并发 CLI 不应该各自 Popen 一份 app.py。"""
+    import threading
+    from contextlib import contextmanager
+
+    spawns = []
+    lock = threading.Lock()
+
+    monkeypatch.setattr(cli, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(cli, "is_up", lambda base: len(spawns) > 0)
+
+    def fake_spawn(base):
+        with lock:
+            spawns.append(base)
+
+    monkeypatch.setattr(cli, "_spawn_server", fake_spawn)
+    monkeypatch.setattr(cli, "_wait_until_up", lambda base: None)
+
+    threads = [
+        threading.Thread(target=cli.ensure_server, args=("http://127.0.0.1:8765", True))
+        for _ in range(5)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    # 只有一个线程真正去拉起进程，其余等到锁后看到服务已在运行。
+    assert len(spawns) == 1
