@@ -34,7 +34,7 @@ ethan-tts = "cli:main"
 # 这是「模块目录里的一堆 .py」，不是常规 package，只能逐个列。
 py-modules = [
   "app", "cli", "config", "db", "engine", "download_model",
-  "stt", "llm", "chat", "setup_cmd",
+  "stt", "llm", "chat", "setup_cmd", "server_cmd", "single_instance",
 ]
 
 # 网页界面必须打进 wheel，否则装完打开 8765 是空白页。
