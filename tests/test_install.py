@@ -59,12 +59,21 @@ def test_all_third_party_imports_are_declared():
 
 
 def test_static_files_are_packaged():
-    """static/ 必须出现在 wheel 的打包配置里，否则装完网页是空白。"""
+    """static/ 必须出现在 wheel 的打包配置里，否则装完网页是空白。
+
+    清单支持 glob（"static/*" 是最省事的写法），所以这里按 glob 匹配，
+    而不是要求逐个文件名都字面出现。
+    """
+    import fnmatch
+
     data_files = _pyproject()["tool"]["setuptools"].get("data-files", {})
-    packaged = {Path(p).name for paths in data_files.values() for p in paths}
-    on_disk = {p.name for p in (ROOT / "static").iterdir() if p.is_file()}
-    missing = on_disk - packaged
-    assert not missing, f"static/ 下这些文件没打进包：{sorted(missing)}"
+    patterns = [p for paths in data_files.values() for p in paths]
+    on_disk = [p for p in (ROOT / "static").iterdir() if p.is_file()]
+    missing = sorted(
+        p.name for p in on_disk
+        if not any(fnmatch.fnmatch(f"static/{p.name}", pattern) for pattern in patterns)
+    )
+    assert not missing, f"static/ 下这些文件没打进包：{missing}"
 
 
 def test_setup_cmd_registered_as_module():

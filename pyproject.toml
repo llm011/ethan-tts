@@ -40,14 +40,4 @@ py-modules = [
 # 网页界面必须打进 wheel，否则装完打开 8765 是空白页。
 # setuptools 对 py-modules 不会自动收顶层目录下的非 .py 文件，只能显式列。
 [tool.setuptools.data-files]
-"static" = [
-  "static/app.js",
-  "static/chat.css",
-  "static/chat.html",
-  "static/chat.js",
-  "static/chat.webmanifest",
-  "static/favicon.svg",
-  "static/index.html",
-  "static/select.js",
-  "static/style.css",
-]
+"static" = ["static/*"]
