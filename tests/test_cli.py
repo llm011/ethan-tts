@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -127,14 +128,24 @@ def test_startup_guard_serializes_concurrent_spawn(tmp_path, monkeypatch):
     lock = threading.Lock()
 
     monkeypatch.setattr(cli, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(cli, "is_up", lambda base: len(spawns) > 0)
+    ready = {"at": None}
+
+    def slow_is_up(base):
+        # 模拟真实时序：spawn 之后服务要过一会儿才 ready。
+        return ready["at"] is not None and time.monotonic() >= ready["at"]
+
 
     def fake_spawn(base):
         with lock:
             spawns.append(base)
 
+    def fake_wait(base):
+        ready["at"] = time.monotonic() + .3
+        time.sleep(.3)
+
+    monkeypatch.setattr(cli, "is_up", slow_is_up)
     monkeypatch.setattr(cli, "_spawn_server", fake_spawn)
-    monkeypatch.setattr(cli, "_wait_until_up", lambda base: None)
+    monkeypatch.setattr(cli, "_wait_until_up", fake_wait)
 
     threads = [
         threading.Thread(target=cli.ensure_server, args=("http://127.0.0.1:8765", True))

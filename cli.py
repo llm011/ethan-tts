@@ -116,7 +116,9 @@ def ensure_server(base: str, autostart: bool) -> None:
         if is_up(base):  # 等锁期间可能已被别人拉起来了
             return
         _spawn_server(base)
-    _wait_until_up(base)
+        # 必须等它就绪再放锁：锁一放，后面的进程会复查 is_up，而服务此刻
+        # 还没 bind 端口，于是又各自 spawn 一份（实测 5 并发会起 5 个）。
+        _wait_until_up(base)
 
 
 @contextmanager
