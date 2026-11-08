@@ -381,3 +381,15 @@ def test_queue_timeout_returns_503(client, monkeypatch):
 
     assert response.status_code == 503
     assert "排队" in response.json()["detail"]
+
+
+def test_queue_timeout_default_allows_batch_synthesis():
+    """默认排队上限要够正常批量用。
+
+    回归背景：默认曾设 180s，而本地克隆音色单节约 60s——3 节并发时最后一节
+    等到 120s+ 就被判超时，正常任务被误杀成 503。这个值只该兜「卡死」。
+    """
+    assert application.QUEUE_TIMEOUT_SEC >= 600, (
+        "排队上限太小会误杀正常批量合成；书稿类管线一次并发 3–10 节，"
+        "本地克隆音色单节约 60s"
+    )
