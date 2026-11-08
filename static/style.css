@@ -72,11 +72,10 @@ input.input[type="number"], input[type="text"], input[type="file"] { -webkit-app
   * { transition-duration: .01ms !important; }
 }
 
-/* Measured: the longest real option is ~151px of text, so 190px + arrow and
-   padding fits every current voice name. field-sizing keeps future long names
-   from clipping in browsers that support it. */
-select.input, select.voice-select { field-sizing: content; min-width: 190px; max-width: 100%; }
-.filter-bar select.input { field-sizing: content; min-width: 170px; max-width: 340px; }
+/* A custom listbox (static/select.js) mirrors these elements and measures the
+   trigger from their rendered width, so no field-sizing and no fixed width
+   here: the listbox sizes itself from the content it holds. */
+select.input, select.voice-select { field-sizing: fixed; min-width: 0; max-width: 100%; }
 
 /* ---- Custom select ------------------------------------------------------ */
 .cs-native{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;
@@ -118,3 +117,36 @@ html.cs-lock{overflow:hidden}
 .unit-input .cs-select{min-width:0}
 .pron-field .cs-select{min-width:0;width:100%}
 @media(prefers-reduced-motion:reduce){.cs-popup{transition:none}}
+
+/* ------------------------------------------------------------ settings tabs */
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:18px;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tab{border:0;background:none;color:var(--muted);font-size:13px;padding:10px 15px;white-space:nowrap;border-bottom:2px solid transparent;margin-bottom:-1px;transition:color .15s,border-color .15s;cursor:pointer}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+.tab-panel{display:none}
+.tab-panel.active{display:block}
+.preset-chip{cursor:pointer}
+.prompt-box{width:100%;font-size:12.5px;line-height:1.75;resize:vertical;font-family:inherit}
+.model-list-inline{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px;margin-bottom:16px}
+.asr-card{border:1px solid var(--line);border-radius:9px;padding:12px 13px;background:var(--panel-soft)}
+.asr-card.active{border-color:var(--accent);background:var(--accent-soft)}
+.asr-card strong{display:block;font-size:12.5px;margin-bottom:2px}
+.asr-card p{margin:0 0 7px;font-size:11px;color:var(--muted)}
+.asr-card .tag{font-size:10px}
+.lan-address{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:var(--panel-soft);border:1px solid var(--line);border-radius:7px;padding:9px 11px;word-break:break-all;color:var(--accent)}
+
+/* Model size sits next to the name; totals summarise disk usage. */
+.model-size{font-size:10px;color:var(--muted);font-weight:400;margin-left:7px;font-variant-numeric:tabular-nums}
+.asr-card strong .model-size{margin-left:6px}
+.models-total{font-size:10.5px;color:var(--muted);margin-bottom:6px}
+.models-total:empty{display:none}
+
+/* Links styled as buttons or nav items must show a hand. */
+a.button, a.nav-item, .mobile-nav a, .preset-chip, .text-button { cursor: pointer; }
+
+@media(max-width:760px){
+  .tabs{margin:0 -18px 14px;padding:0 12px}
+  .tab{padding:9px 11px;font-size:12.5px}
+  .model-list-inline{grid-template-columns:1fr}
+}

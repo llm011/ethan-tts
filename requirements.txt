@@ -3,6 +3,7 @@ mlx-audio==0.6.4
 fastapi==0.162.0
 uvicorn==0.54.0
 python-multipart==0.0.33
-# Only needed for tests and development
+# OpenAI-compatible streaming client for the voice chat page
 httpx==0.28.1
+# Only needed for tests and development
 pytest==8.4.2

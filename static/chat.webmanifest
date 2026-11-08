@@ -1,0 +1,12 @@
+{
+  "name": "语音对话 · ethan-tts",
+  "short_name": "语音对话",
+  "start_url": "/chat",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f7f7f8",
+  "theme_color": "#6a5ae0",
+  "icons": [
+    { "src": "/static/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

@@ -219,6 +219,21 @@ def model_installed(model_key: str) -> bool:
     return path.is_dir() and any(path.glob("*.safetensors"))
 
 
+def model_size_bytes(model_key: str) -> int:
+    """Real size on disk, so the settings page shows what was downloaded.
+
+    Downloader caches under .cache/ are excluded: they are bookkeeping, not
+    weights, and they disappear once a model is complete.
+    """
+    path = model_path(model_key)
+    if not path.is_dir():
+        return 0
+    return sum(
+        f.stat().st_size for f in path.rglob("*")
+        if f.is_file() and ".cache" not in f.parts
+    )
+
+
 class CancelledError(RuntimeError):
     pass
 
@@ -474,3 +489,77 @@ class TTSEngine:
 
 
 engine = TTSEngine()
+
+
+# ---------------------------------------------------------------- voice chat
+# The chat page needs one sentence of audio at a time while the LLM is still
+# talking, so these helpers expose the same trimming/PCM conversion the
+# synthesis API uses without going through the task queue or the artifact store.
+
+def resolve_model_key(voice: dict) -> str:
+    return {"custom": "custom-0.6b-4bit", "design": "design-1.7b-4bit",
+            "clone": "base-0.6b-4bit"}[voice["kind"]]
+
+
+def speech_params(voice: dict, *, sentence_chars: int = 40, streaming_interval: float = .32,
+                  instruct: str | None = None, speed: float = 1.0) -> SynthesisParams:
+    """Parameters for real-time chat speech: no artifact, no task bookkeeping."""
+    return SynthesisParams(
+        text="", voice=voice, model_key=resolve_model_key(voice), instruct=instruct,
+        sentence_chars=sentence_chars, streaming_interval=streaming_interval,
+        speed=speed, stream=True,
+    )
+
+
+def speak_stream(params: SynthesisParams, sentence: str, cancelled=None) -> Iterator[bytes]:
+    """Yield flat PCM16 chunks for one sentence, edge-trimmed at both ends.
+
+    Generation runs in its own thread because the inference lock must be
+    acquired and released by the same thread. The SSE response may be closed
+    from another thread (client hangs up), and a lock held across a ``yield``
+    would then fail to release. The worker only writes to an unbounded queue,
+    so an abandoned consumer never blocks it.
+
+    Streaming mode keeps a one-chunk lookahead: only the first and last chunk
+    are trimmed, and the natural pauses inside a sentence stay untouched.
+    """
+    chunks: Queue[bytes | None] = Queue()
+    error: list[BaseException] = []
+
+    def produce() -> None:
+        try:
+            with engine._lock:  # one inference at a time, like the task queue
+                model = engine.load(params.model_key)
+                pending = None
+                for result in engine._generate(model, params, sentence, True):
+                    if cancelled and cancelled():
+                        return
+                    if pending is None:
+                        first = trim_edge_silence(result.audio, sentence, trim_end=False)
+                        if not len(first):
+                            continue
+                        pending = first
+                        continue
+                    chunks.put(to_pcm16(pending))
+                    pending = np.asarray(result.audio, dtype=np.float32).reshape(-1)
+                if pending is not None:
+                    chunks.put(to_pcm16(trim_edge_silence(
+                        pending, sentence, trim_start=False, trim_end=True)))
+        except BaseException as exc:  # surfaced to the caller below
+            error.append(exc)
+        finally:
+            chunks.put(None)
+
+    threading.Thread(target=produce, name="chat-tts", daemon=True).start()
+    while True:
+        if cancelled and cancelled():
+            return
+        try:
+            chunk = chunks.get(timeout=.2)
+        except queue.Empty:
+            continue
+        if chunk is None:
+            break
+        yield chunk
+    if error:
+        raise error[0]
