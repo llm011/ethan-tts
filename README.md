@@ -18,6 +18,7 @@
 - **设置多 Tab**：通用 / 模型设置 / 语音识别 / 读音纠正 / 模型与资源；模型设置里可测试连接、读取模型列表、一键套用常见服务商。
 - **API**：FastAPI 提供完整 HTTP 接口；启动后可打开 `http://127.0.0.1:8765/docs`。
 - **CLI**：面向 agent 与脚本的 `ethan-tts` 命令，支持合成、克隆、音色/产物/模型/日志管理，全部命令可输出 JSON。
+- **服务托管**：`ethan-tts server install` 注册开机自启与崩溃自愈（macOS launchd），浏览器随时可打开，不必先跑一次 CLI。
 
 ## 语音对话
 
@@ -235,7 +236,7 @@ ethan-tts logs --level ERROR
 ethan-tts setup            # 首次安装自检 + 下载模型
 ethan-tts doctor           # 体检，出问题会给出修复命令
 ethan-tts status --json
-ethan-tts serve            # 后台启动服务
+ethan-tts serve            # 后台启动服务（当前会话临时）
 ethan-tts stop             # 停止服务
 ```
 
@@ -255,6 +256,29 @@ ethan-tts stop             # 停止服务
 约定：成功时退出码 `0`；参数或服务错误时退出码 `2`，并在 `--json` 模式下输出 `{"ok": false, "error": "..."}`。所有命令都支持 `--base` 指向远端实例、`--no-autostart` 禁止自动拉起服务。
 
 环境变量：`ETHAN_TTS_URL`（默认 `http://127.0.0.1:8765`）、`ETHAN_TTS_STARTUP_TIMEOUT`（自动启动等待秒数，默认 90）。
+
+## 托管服务（开机自启）
+
+CLI 能按需拉起服务，但**浏览器页面和 curl 不经过 CLI**——服务没起就是打不开。想做到「登录后一直在、挂了自动起来」，用托管模式：
+
+```bash
+ethan-tts server install    # 安装开机自启（macOS launchd）
+ethan-tts server status     # 查看托管与运行状态
+ethan-tts server start      # 启动
+ethan-tts server stop       # 停止
+ethan-tts server restart    # 重启
+ethan-tts server uninstall  # 移除开机自启
+```
+
+macOS 上写入 `~/Library/LaunchAgents/com.ethan-tts.server.plist`：
+
+- `RunAtLoad` → 登录即启动，网页随时能打开
+- `KeepAlive` → 进程被 `kill -9` 也会自动拉起（实测 PID 会变，服务恢复）
+- 日志写到 `~/Library/Logs/ethan-tts/server.log`
+
+**为什么日志不放数据目录**：实测 launchd 在外部 APFS 卷（`/Volumes/...`）上打不开日志文件，会直接以 `EX_CONFIG 78` 退出、服务起不来。所以托管日志固定放家目录，运行数据仍在原来的 `data/`。
+
+非 macOS 平台可用 `ethan-tts server start/stop/status` 的 pid 文件模式，但没有开机自启；`server install` 会明确提示只支持 macOS。
 
 ## 读音纠正
 

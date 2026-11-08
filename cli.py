@@ -556,6 +556,88 @@ def cmd_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+# ------------------------------------------------------------------ server
+
+def cmd_server(args: argparse.Namespace) -> int:
+    """托管模式：install 之后浏览器无需先跑 CLI 也能打开。"""
+    import server_cmd as server
+
+    action = args.action
+    url = args.base
+    if action == "install":
+        if not server.is_macos():
+            raise ApiError("自动托管（开机自启）目前仅支持 macOS；其它平台可用 "
+                           "`ethan-tts server start` 的 pid 模式")
+        ok, detail = server.install_launchd()
+        if not ok:
+            raise ApiError(f"安装失败：{detail}")
+        ready = server.wait_ready(url, seconds=45)
+        emit({"installed": True, "plist": detail, "running": ready}, args.json,
+             human=f"已安装并注册开机自启：{detail}\n"
+                   f"服务{'已就绪' if ready else '正在启动，稍后用 server status 确认'}")
+        return 0
+
+    if action == "uninstall":
+        ok, detail = server.uninstall_launchd()
+        if not ok:
+            raise ApiError(detail)
+        emit({"installed": False}, args.json, human=detail)
+        return 0
+
+    if action == "start":
+        if server.backend() == "launchd":
+            ok, detail = server.start_launchd()
+        else:
+            ok, detail = server.start_pid()
+        if not ok:
+            raise ApiError(detail)
+        ready = server.wait_ready(url, seconds=45)
+        emit({"running": ready, "detail": detail}, args.json, human=f"{detail}，{'已就绪' if ready else '启动中'}")
+        return 0
+
+    if action == "stop":
+        if server.backend() == "launchd":
+            ok, detail = server.stop_launchd()
+        else:
+            ok, detail = server.stop_pid()
+        if not ok:
+            raise ApiError(detail)
+        emit({"running": False, "detail": detail}, args.json, human=detail)
+        return 0
+
+    if action == "restart":
+        if server.backend() == "launchd":
+            server.stop_launchd()
+            time.sleep(.5)
+            ok, detail = server.start_launchd()
+        else:
+            server.stop_pid()
+            ok, detail = server.start_pid()
+        if not ok:
+            raise ApiError(detail)
+        ready = server.wait_ready(url, seconds=45)
+        emit({"running": ready, "detail": detail}, args.json,
+             human=f"已重启，{'已就绪' if ready else '启动中'}")
+        return 0
+
+    # status
+    info = server.status(url)
+    if args.json:
+        emit(info, True)
+    else:
+        print(f"地址：{info['url']}")
+        print(f"运行：{'是' if info['running'] else '否'}")
+        print(f"托管：{info['backend']}" + ("（已安装开机自启）" if info["installed"] else "（未安装）"))
+        if info.get("plist"):
+            print(f"配置：{info['plist']}")
+        if info.get("launchd_loaded") is not None:
+            print(f"launchd：{'已加载' if info['launchd_loaded'] else '未加载'}")
+        if info.get("models_loaded") is not None:
+            print(f"已加载模型：{', '.join(info['models_loaded']) or '无'}")
+            print(f"Metal 活跃内存：{info.get('metal_active_gb')} GB")
+    return 0 if info["running"] else 1
+
+
 # ------------------------------------------------------------------ parser
 
 
@@ -677,6 +759,20 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor", parents=[common],
                             help="体检：环境、依赖、模型、服务是否正常")
     doctor.set_defaults(func=cmd_doctor)
+
+    server = sub.add_parser("server", parents=[common],
+                            help="托管服务：install/start/stop/restart/status/uninstall")
+    server_sub = server.add_subparsers(dest="action", required=True)
+    for name, help_text in (
+        ("install", "安装开机自启（macOS launchd）"),
+        ("uninstall", "移除开机自启"),
+        ("start", "启动服务"),
+        ("stop", "停止服务"),
+        ("restart", "重启服务"),
+        ("status", "查看托管状态"),
+    ):
+        sub_parser = server_sub.add_parser(name, parents=[common], help=help_text)
+        sub_parser.set_defaults(func=cmd_server, action=name)
 
     status = sub.add_parser("status", help="查看服务与资源状态", parents=[common])
     status.set_defaults(func=cmd_status)
