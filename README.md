@@ -13,8 +13,84 @@
 - **运行日志**：按级别、模块、关键词与任务筛选，查看结构化错误和模型下载记录，可清空。
 - **设置与资源**：默认发音人、文本长度、切句长度、流式间隔、自动播放、模型按需下载、主动释放内存。
 - **读音纠正**：自定义替换词典，把模型读错的词换成想要的读法（如 `Qwen` → 「千问」）；支持大小写敏感、逐条启停、命中计数与试听前预览。
+- **语音对话**（`/chat`）：说话 → 本地识别 → 流式模型回答 → 边生成边朗读。三阶段并行，模型吐出第一句就立刻合成，不等整段回答。
+- **对话记录**：每轮问答（含识别文本、模型、耗时）存进 SQLite，左侧可切换/重命名/删除历史对话，回来后自动带上上下文。
 - **API**：FastAPI 提供完整 HTTP 接口；启动后可打开 `http://127.0.0.1:8765/docs`。
 - **CLI**：面向 agent 与脚本的 `ethan-tts` 命令，支持合成、克隆、音色/产物/模型/日志管理，全部命令可输出 JSON。
+
+## 语音对话
+
+打开 **<http://127.0.0.1:8765/chat>**（手机用局域网地址，见下文）。第一次会提示还没配置模型，点提示里的链接跳到设置页的「模型设置」填三项：接口地址、API Key、模型名称。任何兼容 OpenAI `/chat/completions` 的服务都行——DeepSeek、OpenAI、智谱、通义、Kimi，或本机的 Ollama / LM Studio。填完点「测试连接」，通过后回到对话页就能说话。
+
+### 一轮对话是怎么跑起来的
+
+```text
+按住说话 ──► VAD 检测停顿 ──► 录音上传
+                                │
+                     Qwen3-ASR 本地识别（热态约 0.2s）
+                                │
+                     模型流式输出，按标点切句
+                          │              │
+                  第 1 句进 TTS    第 2 句继续流式生成
+                          │              │
+                    PCM 边合成边播放 ◄────┘
+```
+
+三件事同时进行，所以**首句出声**和**整段说完**是两个时间。实测（M4 / 24GB，DeepSeek + 0.6B TTS）：
+
+| 指标 | 热态 |
+| --- | ---: |
+| 识别一句话 | 约 **0.2 秒** |
+| 第一句切好（模型刚吐完第一句） | 约 **0.5 秒** |
+| 首句音频开始播放 | 约 **1.0 秒** |
+| 三句话全部说完 | 约 **6.6 秒** |
+
+冷启动要多等一次模型加载（TTS 约 7 秒、ASR 约 1–2 秒），之后常驻。
+
+### 为什么 system prompt 这样写
+
+正常聊天模型的回答直接朗读会很难听：一段三四百字的 Markdown 念完要一分钟，列表符号、加粗星号、括号注释都会被念出来。默认提示词因此按优先级约束：
+
+1. **先限长度**：1–3 句、一般不超过 80 字，只有用户要求展开才多说；
+2. **只输出可朗读文本**：禁 Markdown、列表、代码块、链接、表情、括注；
+3. **数字口语化**：「下午三点」而不是「15:00」，「百分之二十」而不是「20%」；
+4. **先结论后追问**：多步问题先给结论，再问要不要继续；
+5. **不确定就说不确定**，不编造。
+
+设置页「回答风格」里可以改，也能一键恢复默认。后端还会再兜一层：送给 TTS 前剥掉 Markdown、表情和多余符号，避免模型没听话时把「星号星号」念出来。
+
+### 语音识别用什么
+
+两种都在本机 MLX 上跑，录音不出机器：
+
+| 模型 | 体积 | 热态耗时 | 适合 |
+| --- | ---: | ---: | --- |
+| **Qwen3-ASR 0.6B 4bit**（默认） | 0.7 GB | **0.2 秒** | 中英日韩多语种，短句准、延迟低 |
+| Whisper large-v3 turbo 4bit | 0.5 GB | 1.65 秒 | 有口音或嘈杂环境更稳 |
+
+在「设置 → 语音识别」切换。没考虑的方案：`faster-whisper` 在 Apple Silicon 只有 CPU 且会和 Metal 抢资源；Apple `Speech.framework` 要写 Swift 桥接且中文切句不可控；云端 ASR 与「本地运行」定位冲突。
+
+```bash
+.venv/bin/python download_model.py --role asr        # 下载两个识别模型
+.venv/bin/python download_model.py --model qwen3-asr-0.6b-4bit
+```
+
+### 手机上用
+
+同一个 Wi-Fi 下让手机打开即可：
+
+```bash
+.venv/bin/python app.py --host 0.0.0.0
+# 页面里「设置 → 模型与资源 → 手机访问」会显示实际地址，形如 http://10.0.0.5:8765/chat
+```
+
+`/chat` 是独立的 H5 页面：响应式布局、抽屉式对话历史、底部输入栏、刘海与 Home 指示条安全区适配，iOS Safari 里可「添加到主屏幕」全屏打开。手机上是**点一下开始、再点一下发送**（长按会和浏览器手势冲突），电脑上是按住说话；停顿 1.2 秒也会自动发送。
+
+> 用 `--host 0.0.0.0` 会把服务暴露给同网段的设备，且目前没有登录认证。只在可信网络里这么用，不要映射到公网。
+
+### 打断
+
+说话过程中再点一下麦克风（或点顶栏的 ■）就中断：后端立刻停掉模型请求和排队中的合成，**已经朗读出来的部分仍会存进对话记录**，不会白说。
 
 ## 实测性能
 
@@ -31,6 +107,10 @@
 | 测试过程 Metal 峰值 | 约 **4.4–4.7 GB** |
 
 实际结果随文本、语气、采样参数、机器负载与磁盘缓存而变化。第一次使用需先加载模型；长文本按句生成，不能把整篇文稿都理解成固定 10 秒完成。默认配置的目标是**常用短文本 10 秒级、流式试听亚秒级首包**，而不是用更高内存换极限速度。
+
+> **注意冷启动和热态是两回事。** 首次运行还要编译 Metal 内核 + 预热磁盘，冷启动实测可能到
+> **30–40 秒**（一次性，之后不会再出现）；模型常驻后的冷启动约 **6 秒**，热态首包 0.4 秒。
+> 如果你是第一次用，别被那 40 秒劝退。
 
 ### 声音克隆实测
 
@@ -69,41 +149,117 @@ Qwen3-TTS 每段独立生成时，首尾各带约 **300 ms** 静音。早期版�
 ### 环境要求
 
 - Apple Silicon Mac（M1 及更新），建议 16 GB 及以上统一内存；开发测试机为 24 GB。
-- Python **3.10–3.12**，推荐 3.12。MLX 不支持 Intel Mac。
-- 安装 [uv](https://docs.astral.sh/uv/)（推荐）和 `ffmpeg`（仅克隆录音转码需要）。
-- 默认模型下载约 **1.6 GB**，准备约 3 GB 空闲空间。可选模型需要额外磁盘与内存。
+- Python **3.10–3.12**，推荐 3.12。MLX 不支持 Intel Mac（会直接报错退出，不会静默变慢）。
+- 安装 [uv](https://docs.astral.sh/uv/)（推荐）和 `ffmpeg`（仅克隆录音与非 WAV 导出需要）。
+- 默认模型 **1.6 GB**，准备约 3 GB 空闲空间。可选模型需要额外磁盘与内存。
+
+### 一条命令装好
 
 ```bash
-# 1. 创建隔离环境，不修改系统 Python
+uv tool install --python 3.12 ethan-tts
+ethan-tts setup
+```
+
+`setup` 会检查平台、Python 和依赖，然后**问你要不要下载模型**：
+
+```
+默认模型还没下载：0.6B · CustomVoice · 4bit
+  · 体积约 1.6 GB
+  · 位置 ~/Library/Application Support/ethan-tts/models
+  · 从 Hugging Face 下载（本机代理、hf-mirror、直连会依次尝试）
+现在下载吗？ [y/N]
+```
+
+> **不会偷偷下 1.6 GB。** 交互环境下明确告知体积和位置再问你；
+> 非交互（agent、CI、管道）默认**跳过**，不会挂住等输入。
+> 随时可以显式装：`ethan-tts setup --download` 或 `ethan-tts models download custom-0.6b-4bit`。
+
+装完直接打开 **<http://127.0.0.1:8765>** 就是图形界面，命令行也行：
+
+```bash
+ethan-tts say "你好，这是本地合成的语音。" -o hello.wav
+```
+
+模型不在服务启动时加载，**第一次合成时才加载**（约 3–6 秒），之后常驻以消除重复加载延迟。
+
+### 装坏了？跑一次自检
+
+```bash
+ethan-tts doctor
+```
+
+```
+✓ 平台：Darwin arm64
+✓ Python：3.12.13
+✓ 依赖：mlx + mlx-audio 可用
+✓ 安装位置：.../site-packages（uv tool / pip 安装）
+✓ 数据目录：~/Library/Application Support/ethan-tts/data
+✓ 模型目录：~/Library/Application Support/ethan-tts/models
+✓ 默认模型：0.6B · CustomVoice · 4bit 已就绪
+✓ 服务：http://127.0.0.1:8765 可访问
+✓ ffmpeg：/opt/homebrew/bin/ffmpeg
+✓ PATH：~/.local/bin/ethan-tts
+```
+
+它**只读、不改任何东西**，逐项指出哪一环坏了以及该敲什么命令修。
+`--json` 可给脚本解析。
+
+### 文件放在哪
+
+安装包和数据是分开的——升级或重装不会弄丢模型和音色：
+
+| 内容 | 位置 |
+| --- | --- |
+| 程序 | Python 环境里（`uv tool` / `pip` 管） |
+| 数据、音色、音频产物、日志 | `~/Library/Application Support/ethan-tts/data` |
+| 模型权重 | `~/Library/Application Support/ethan-tts/models` |
+
+想整体换位置（比如放到外置盘）用 `ETHAN_TTS_DIR=/path/to/dir`；
+也可以单独设 `ETHAN_TTS_DATA_DIR` / `ETHAN_TTS_MODEL_DIR`。
+
+> 从 git clone 的老方式升级过来时，源码旁边的 `models/`、`data/` **会被自动复用**，
+> 不会让你重新下 1.6 GB。
+
+国内网络下载超时会自动换路（本机 `127.0.0.1:7890` 代理 → hf-mirror → 直连）。
+也可以手动指定：
+
+```bash
+HTTPS_PROXY=http://127.0.0.1:7890 ethan-tts models download
+```
+
+### 从源码开发
+
+```bash
+git clone https://github.com/llm011/ethan-tts.git
+cd ethan-tts
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements.txt
-
-# 2. 只下载默认的轻量模型
-.venv/bin/python download_model.py
-
-# 3. 启动
+.venv/bin/python download_model.py     # 或 .venv/bin/python -m cli setup
 .venv/bin/python app.py
 ```
 
-打开 **<http://127.0.0.1:8765>**。模型不在服务启动时加载，第一次合成时才加载；之后保持常驻以消除重复加载延迟。停止服务用 `Ctrl+C`。
-
-国内网络下载超时时，可使用本机代理（脚本也会自动尝试 `127.0.0.1:7890` 和 hf-mirror）：
-
-```bash
-HTTPS_PROXY=http://127.0.0.1:7890 .venv/bin/python download_model.py
-```
+源码目录跑时，`data/` 和 `models/` 默认仍落在仓库旁边（`.gitignore` 已忽略）。
 
 ## 命令行（推荐给 agent 用）
+
+> **做流式集成请直接用 HTTP 接口，不要绕 CLI。** 服务的 `POST /api/tts/stream` 才是真流式
+> （边生成边吐 PCM，首包约 0.15–0.4 秒）；而 `ethan-tts say --stream` 是「整段合成完再
+> 落盘」，**不往 stdout 吐音频**——拿它做流式代理只能等全部合成结束。
+> 对接方式见下方「HTTP 接口」。
+
+
 
 CLI 默认连到已常驻的服务，所以**不会重复加载模型**，热态下几秒就能返回。服务没开时它会自动在后台拉起并等待就绪，不需要你手动先启动。
 
 安装（独立工具环境，不污染系统 Python，也不占模型内存）：
 
 ```bash
-cd /Volumes/SSDExt/code/life/ethan-tts
-uv tool install --python 3.12 --editable .
+uv tool install --python 3.12 ethan-tts
+ethan-tts setup
 # 之后任意目录都能直接用 ethan-tts
 ```
+
+从源码开发时改用 `uv tool install --python 3.12 --editable .`。
 
 ```bash
 # 最常用：合成一句话，存成 WAV
@@ -134,7 +290,11 @@ ethan-tts artifacts list
 ethan-tts artifacts get <id> -o copy.wav
 ethan-tts models list
 ethan-tts logs --level ERROR
+ethan-tts chat --text "介绍一下杭州" --json     # 一轮对话，返回文字和 WAV
+ethan-tts chat turn.wav -o reply.wav          # 从录音开始
 ethan-tts status --json
+ethan-tts doctor           # 只读自检：哪一环坏了、该敲什么修
+ethan-tts setup            # 首次安装配置（会询问是否下模型）
 ethan-tts serve            # 后台启动服务
 ethan-tts stop             # 停止服务
 ```
@@ -212,7 +372,37 @@ ethan-tts pronounce rm Qwen
 - **想暂停流式试听**：点「❚❚ 暂停」挂起播放（后台仍在继续生成），「▶ 继续」接着播，暂停期间不会丢音频；「■ 停止」直接中止这次试听。
 - **要调语速**：优先用 0.85×–1.3× 区间，超出后母音与呼吸节奏会开始失真；语速是生成后处理，**不增加模型耗时**，但需要 `ffmpeg`。
 
-## API 示例
+## 对话 API
+
+```bash
+# 一轮对话，SSE 流：status / asr / user / sentence / audio / pause / done / error
+curl -N -X POST http://127.0.0.1:8765/api/chat/turn \
+  -F session_id=chat:xxxx -F transcript='你好' --output turn.txt
+
+# 上传录音（16 kHz 单声道 WAV），由服务端识别
+curl -N -X POST http://127.0.0.1:8765/api/chat/turn \
+  -F session_id=chat:xxxx -F audio=@turn.wav --output turn.txt
+
+curl http://127.0.0.1:8765/api/chat/sessions
+curl http://127.0.0.1:8765/api/chat/sessions/chat:xxxx
+curl -X PATCH http://127.0.0.1:8765/api/chat/settings \
+  -H 'Content-Type: application/json' \
+  -d '{"llm_base_url":"https://api.deepseek.com/v1","llm_model":"deepseek-chat","llm_api_key":"sk-..."}'
+```
+
+`audio` 事件里的 `pcm` 是 base64 的 PCM16 单声道，采样率见同事件的 `rate` 字段（当前 24000），前端直接排进 Web Audio 时间线。
+
+## HTTP 接口
+
+做集成（尤其是**流式**）时的要点：
+
+- `POST /api/tts` — 同步合成，一次性返回完整 WAV。头里带 `X-Audio-Seconds`、`X-Gen-Seconds`、`X-RTF`。
+- `POST /api/tts/stream` — **真流式**：`PCM16 / 单声道 / 24 kHz`，边生成边吐。
+  - 首包约 **0.15–0.4 秒**（模型已加载时）
+  - 开头的 WAV 头里 `RIFF` / `data` 长度字段是 `0xFFFFFFFF`（流没结束不可能知道总长）。
+    **浏览器 `decodeAudioData` 会把这种头当损坏文件**，需要自己跳过 44 字节头后按 PCM16
+    逐块喂给播放器；或者用 `<audio>` 直接指向该 URL（由浏览器自己处理 chunked 流）。
+  - 拿到的是「无限长」WAV，写完才需要补正长度（CLI 的 `write_stream_wav` 就是这么做的）。
 
 ```bash
 # 同步合成，保存并返回 WAV
@@ -246,6 +436,8 @@ models/               # 权重，Git 忽略
 data/ethan_tts.db     # 音色、设置、任务、产物元数据和结构化日志
 data/artifacts/       # 生成的 WAV
 data/voices/          # 用户上传并转码的参考录音
+# 对话记录存在 data/ethan_tts.db 的 chat_sessions / chat_messages 表
+# API Key 也在同一个库里，明文保存；这个库不要提交、不要同步到公共位置
 ```
 
 删除 `data/` 会清空个人设置、音色、任务、日志与生成音频；请先备份需要的内容。`models/` 可独立删除并重新下载。
@@ -265,11 +457,14 @@ node --check static/app.js             # 如果本机安装了 Node.js
 ```text
 app.py                # HTTP API、请求校验与生命周期
 engine.py             # 模型管理、单并发推理、切句、PCM/WAV、后台队列
-db.py                 # SQLite 持久化
-config.py             # 模型目录、默认音色与设置
-static/               # 中文管理台（合成/音色/产物/任务/日志/设置）
+stt.py                # 本地语音识别（Qwen3-ASR / Whisper），单模型常驻
+llm.py                # OpenAI 兼容的流式客户端，错误信息面向用户
+chat.py               # 对话编排：ASR → 流式 LLM → 分句 → 逐句 TTS
+db.py                 # SQLite 持久化（含对话会话与消息）
+config.py             # 模型注册表、默认音色、对话与提示词默认值
+static/               # 中文管理台 + /chat 语音对话页
 download_model.py     # 可断点续传的模型下载器
-tests/                # 使用假引擎的快速测试
+tests/                # 使用假引擎/假模型的快速测试
 ```
 
 ## 许可与致谢

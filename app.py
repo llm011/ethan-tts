@@ -6,25 +6,32 @@ Open http://127.0.0.1:8765 after model download.
 from __future__ import annotations
 
 import os
+import tempfile
+import time
 import uuid
 import wave
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
+import chat
+import llm
+import stt
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 import db
 from config import (
-    ARTIFACT_DIR, DEFAULT_MODEL, DEFAULT_SETTINGS, MAX_REFERENCE_BYTES,
-    MIN_REFERENCE_SECONDS, MODELS, ROOT, VOICE_DIR,
+    ARTIFACT_DIR, ASR_MODELS, CHAT_DEFAULTS, CHAT_MODEL_PRESETS, DEFAULT_ASR_MODEL,
+    DEFAULT_MODEL, DEFAULT_SETTINGS, DEFAULT_SYSTEM_PROMPT, MAX_REFERENCE_BYTES,
+    MIN_REFERENCE_SECONDS, MODELS, ROOT, SAMPLE_RATE, STT_SAMPLE_RATE, STATIC_DIR,
+    TTS_MODELS, VOICE_DIR,
 )
 from engine import (
     CancelledError, SynthesisParams, apply_pronunciations, engine, model_installed,
-    stream_wav_header,
+    resolve_model_key, stream_wav_header,
 )
 
 
@@ -41,7 +48,22 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="ethan-tts", lifespan=lifespan)
-app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
+
+
+class NoCacheStatic(StaticFiles):
+    """Local app: always revalidate, so an edited page is never served stale.
+
+    StaticFiles sends ETag/Last-Modified and lets the browser reuse its copy;
+    during development that meant a CSS fix looked like it never happened.
+    """
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
+
+
+app.mount("/static", NoCacheStatic(directory=STATIC_DIR), name="static")
 
 
 class SynthesisRequest(BaseModel):
@@ -159,7 +181,52 @@ def synthesis_params(req: SynthesisRequest, speaker: dict) -> SynthesisParams:
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
-    return (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    return HTMLResponse(
+        (STATIC_DIR / "index.html").read_text(encoding="utf-8"),
+        headers={"Cache-Control": "no-cache, must-revalidate"},
+    )
+
+
+@app.get("/chat", response_class=HTMLResponse)
+def chat_page() -> str:
+    return HTMLResponse(
+        (STATIC_DIR / "chat.html").read_text(encoding="utf-8"),
+        headers={"Cache-Control": "no-cache, must-revalidate"},
+    )
+
+
+@app.get("/api/network")
+def network_addresses() -> dict:
+    """LAN URLs so a phone on the same Wi-Fi can open the voice page."""
+    import socket
+
+    urls: list[str] = []
+    hostname = socket.gethostname()
+    try:
+        for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            address = info[4][0]
+            if address.startswith("127."):
+                continue
+            urls.append(f"http://{address}:{_PORT}")
+    except OSError:
+        pass
+    # The primary interface is usually the one the default route uses.
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("8.8.8.8", 80))
+            primary = probe.getsockname()[0]
+        if primary not in {url.rsplit(":", 2)[-2] for url in urls}:
+            urls.insert(0, f"http://{primary}:{_PORT}")
+    except OSError:
+        pass
+    return {"urls": sorted(set(urls)), "port": _PORT,
+            "loopback_only": _BIND_HOST in {"127.0.0.1", "localhost"}}
+
+
+@app.get("/chat.webmanifest")
+def chat_manifest() -> FileResponse:
+    # Lets the page be added to a phone home screen and open standalone.
+    return FileResponse(STATIC_DIR / "chat.webmanifest", media_type="application/manifest+json")
 
 
 @app.get("/health")
@@ -581,8 +648,15 @@ def update_settings(req: SettingsPatch) -> dict:
 
 def model_status() -> list[dict]:
     loaded = set(engine.resource_snapshot()["loaded_models"])
-    return [{**value, "key": key, "installed": model_installed(key), "loaded": key in loaded}
-            for key, value in MODELS.items()]
+    asr_loaded = stt.stt.loaded_key()
+    items = []
+    for key, value in MODELS.items():
+        if value["role"] == "asr":
+            installed, loaded_now = stt.asr_model_installed(key), asr_loaded == key
+        else:
+            installed, loaded_now = model_installed(key), key in loaded
+        items.append({**value, "key": key, "installed": installed, "loaded": loaded_now})
+    return items
 
 
 @app.get("/api/models")
@@ -630,13 +704,257 @@ def unload_models() -> dict:
 import threading
 model_download_lock = threading.Lock()
 
+# Overwritten by the CLI entry point; the API reports these back to the page.
+_BIND_HOST = os.environ.get("HOST", "127.0.0.1")
+_PORT = int(os.environ.get("PORT", "8765"))
+
+
+
+
+# ---------------------------------------------------------------- voice chat
+# The chat page is its own entry point (/chat) so the voice app can be opened
+# directly from a phone home screen without the rest of the console.
+
+class ChatSettingsPatch(BaseModel):
+    llm_base_url: str | None = Field(default=None, max_length=300)
+    llm_api_key: str | None = Field(default=None, max_length=300)
+    llm_model: str | None = Field(default=None, max_length=120)
+    llm_temperature: float | None = Field(default=None, ge=0, le=2)
+    llm_max_tokens: int | None = Field(default=None, ge=64, le=2048)
+    system_prompt: str | None = Field(default=None, max_length=4000)
+    voice_id: str | None = None
+    asr_model: str | None = None
+    tts_min_chars: int | None = Field(default=None, ge=2, le=40)
+    tts_max_chars: int | None = Field(default=None, ge=20, le=200)
+    tts_first_chars: int | None = Field(default=None, ge=4, le=40)
+    speech_rate: float | None = Field(default=None, ge=.5, le=2)
+    auto_send: bool | None = None
+    history_turns: int | None = Field(default=None, ge=0, le=40)
+
+
+class ChatSessionCreate(BaseModel):
+    title: str = Field(default="新的对话", max_length=60)
+
+
+class ChatSessionPatch(BaseModel):
+    title: str = Field(min_length=1, max_length=60)
+
+
+class ModelTestRequest(BaseModel):
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
+
+
+def public_model_status() -> dict:
+    return {"tts": [item for item in model_status() if item["role"] == "tts"],
+            "asr": [item for item in model_status() if item["role"] == "asr"]}
+
+
+@app.get("/api/chat/bootstrap")
+def chat_bootstrap() -> dict:
+    """Everything the chat page needs on first paint, in one round trip."""
+    settings = db.get_chat_settings()
+    system_prompt = settings.pop("system_prompt")
+    return {
+        "settings": settings,
+        "models": public_model_status(),
+        "voices": [dict(row) for row in _voice_rows()],
+        "presets": CHAT_MODEL_PRESETS,
+        "system_prompt": system_prompt,
+        "default_prompt": DEFAULT_SYSTEM_PROMPT,
+        "audio_rate": SAMPLE_RATE,
+        "stt_rate": STT_SAMPLE_RATE,
+        "sessions": db.list_chat_sessions(),
+    }
+
+
+def _voice_rows():
+    with db.connect() as conn:
+        return conn.execute(
+            "SELECT id,name,kind,description,speaker,language FROM voices "
+            "ORDER BY is_preset DESC, is_favorite DESC, created_at",
+        ).fetchall()
+
+
+@app.get("/api/chat/settings")
+def get_chat_settings_endpoint() -> dict:
+    return db.get_chat_settings()
+
+
+@app.patch("/api/chat/settings")
+def patch_chat_settings(req: ChatSettingsPatch) -> dict:
+    values = req.model_dump(exclude_unset=True)
+    if values.get("llm_base_url") is not None:
+        try:
+            values["llm_base_url"] = llm.normalize_base_url(values["llm_base_url"])
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+    if values.get("voice_id") and not db.voice(values["voice_id"]):
+        raise HTTPException(400, "朗读音色不存在")
+    if values.get("asr_model") and values["asr_model"] not in ASR_MODELS:
+        raise HTTPException(400, "不支持的语音识别模型")
+    if (values.get("tts_min_chars") and values.get("tts_max_chars")
+            and values["tts_min_chars"] >= values["tts_max_chars"]):
+        raise HTTPException(400, "最短句长需要小于最长句长")
+    result = db.update_chat_settings(values)
+    db.log("INFO", "settings", "更新语音对话设置",
+           metadata={k: ("已更新" if k == "llm_api_key" else v) for k, v in values.items()})
+    return result
+
+
+@app.post("/api/chat/settings/test")
+def test_chat_model(req: ModelTestRequest) -> dict:
+    """One tiny completion proves the URL, key and model name all work."""
+    key = req.api_key.strip() or chat.stored_api_key()
+    config = llm.ChatConfig(base_url=req.base_url, api_key=key, model=req.model,
+                            max_tokens=16, temperature=0)
+    started = time.monotonic()
+    try:
+        reply = "".join(llm.stream_chat(config, [
+            {"role": "user", "content": "只回复两个字：你好"},
+        ]))
+    except llm.LLMError as exc:
+        return JSONResponse(status_code=400, content={"ok": False, "message": str(exc)})
+    return {"ok": True, "reply": reply.strip()[:60],
+            "seconds": round(time.monotonic() - started, 2)}
+
+
+@app.get("/api/chat/settings/models")
+def list_provider_models(base_url: str, api_key: str = "") -> dict:
+    try:
+        items = llm.list_models(llm.ChatConfig(
+            base_url=base_url, api_key=api_key.strip() or chat.stored_api_key()))
+    except Exception as exc:
+        raise HTTPException(400, f"读取模型列表失败：{exc}") from exc
+    return {"items": items}
+
+
+# ---------------------------------------------------------------- sessions
+
+@app.get("/api/chat/sessions")
+def list_chat_sessions() -> dict:
+    return {"items": db.list_chat_sessions()}
+
+
+@app.post("/api/chat/sessions", status_code=201)
+def create_chat_session(req: ChatSessionCreate) -> dict:
+    return db.create_chat_session(req.title)
+
+
+@app.get("/api/chat/sessions/{session_id}")
+def get_chat_session(session_id: str) -> dict:
+    session = db.chat_session(session_id)
+    if not session:
+        raise HTTPException(404, "对话不存在")
+    return {**session, "messages": db.chat_messages(session_id)}
+
+
+@app.patch("/api/chat/sessions/{session_id}")
+def rename_chat_session(session_id: str, req: ChatSessionPatch) -> dict:
+    if not db.chat_session(session_id):
+        raise HTTPException(404, "对话不存在")
+    db.rename_chat_session(session_id, req.title)
+    return db.chat_session(session_id)
+
+
+@app.delete("/api/chat/sessions/{session_id}")
+def delete_chat_session(session_id: str) -> dict:
+    if not db.chat_session(session_id):
+        raise HTTPException(404, "对话不存在")
+    db.delete_chat_session(session_id)
+    db.log("INFO", "chat", "删除对话记录", metadata={"session": session_id})
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- one turn
+
+def _save_turn_audio(content: bytes) -> Path:
+    """Persist the uploaded recording just long enough to transcribe it."""
+    suffix = ".wav"
+    path = Path(tempfile.mkdtemp(prefix="chat-turn-")) / f"{uuid.uuid4().hex}{suffix}"
+    path.write_bytes(content)
+    return path
+
+
+@app.post("/api/chat/turn")
+async def chat_turn(
+    request: Request,
+    session_id: Annotated[str, Form()] = "",
+    transcript: Annotated[str, Form()] = "",
+    audio: Annotated[UploadFile | None, File()] = None,
+) -> StreamingResponse:
+    """Run one spoken turn and stream the reply as SSE.
+
+    Events: status / asr / user / sentence / audio / pause / warn / done / error.
+    Audio is raw PCM16 mono at ``sample_rate`` of the settings, base64 encoded,
+    so the page can schedule chunks while the reply is still generating.
+    """
+    session = db.chat_session(session_id) if session_id else None
+    if not session:
+        session = db.create_chat_session()
+        session_id = session["id"]
+
+    text = transcript.strip() or None
+    path: Path | None = None
+    if text is None:
+        if audio is None:
+            raise HTTPException(400, "请提供录音或文本")
+        content = await audio.read(MAX_REFERENCE_BYTES + 1)
+        if len(content) > MAX_REFERENCE_BYTES:
+            raise HTTPException(413, "录音过长，请分成几句说")
+        if len(content) < 100:
+            raise HTTPException(400, "录音为空，请重新录一次")
+        path = _save_turn_audio(content)
+
+    def generate():
+        try:
+            yield from chat.run_turn(session_id, wav_path=path, transcript=text,
+                                     input_mode="voice" if text is None else "text")
+        finally:
+            if path is not None:
+                path.unlink(missing_ok=True)
+                try:
+                    path.parent.rmdir()
+                except OSError:
+                    pass
+
+    return StreamingResponse(
+        generate(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                 "X-Chat-Session": session_id},
+    )
+
+
+@app.post("/api/chat/speak")
+def chat_speak(req: SynthesisRequest) -> StreamingResponse:
+    """Re-read one saved message aloud (the page's 重新朗读 button)."""
+    speaker = ensure_voice(req.voice_id)
+    params = synthesis_params(req, speaker)
+    params.stream = True
+
+    def generate():
+        yield stream_wav_header()
+        try:
+            for chunk in engine.synthesize(params):
+                yield chunk
+        except (CancelledError, GeneratorExit):
+            return
+
+    return StreamingResponse(generate(), media_type="audio/wav")
+
 
 if __name__ == "__main__":
     import argparse
     import uvicorn
 
     parser = argparse.ArgumentParser(description="ethan-tts 本地语音管理台")
-    parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
+    parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"),
+                        help="用 0.0.0.0 让同一局域网的手机访问")
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8765")))
     args = parser.parse_args()
+    _BIND_HOST = args.host
+    _PORT = args.port
+    if args.host in {"0.0.0.0", "::"}:
+        db.log("INFO", "system", "服务已监听局域网，手机可用 /chat 打开语音对话")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")

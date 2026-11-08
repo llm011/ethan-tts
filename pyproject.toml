@@ -10,10 +10,18 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
+  # 推理
   "mlx-audio==0.6.4",
+  "mlx>=0.21",
+  "numpy>=1.26",
+  # Web 服务
   "fastapi==0.162.0",
   "uvicorn==0.54.0",
   "python-multipart==0.0.33",
+  "pydantic>=2.6",
+  # 模型下载（download_model.py）与语音对话页调用模型（llm.py）
+  "huggingface_hub>=0.23",
+  "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -23,7 +31,23 @@ dev = ["httpx==0.28.1", "pytest==8.4.2"]
 ethan-tts = "cli:main"
 
 [tool.setuptools]
-py-modules = ["app", "cli", "config", "db", "engine", "download_model"]
+# 这是「模块目录里的一堆 .py」，不是常规 package，所以用 py-modules 逐个列。
+py-modules = [
+  "app", "cli", "config", "db", "engine", "download_model",
+  "stt", "llm", "chat", "setup_cmd",
+]
 
-[tool.setuptools.package-data]
-"*" = ["static/*"]
+# 网页界面（static/）必须打进 wheel，否则 pip/uv 装完打开 8765 是空白页。
+# setuptools 对 py-modules 不会自动收顶层目录下的非 .py 文件，只能显式声明：
+# 把它当 data-files 挂到包的安装前缀下，路径与 app.py 里的 ROOT / "static" 一致。
+[tool.setuptools.data-files]
+"static" = [
+  "static/app.js",
+  "static/chat.css",
+  "static/chat.html",
+  "static/chat.js",
+  "static/chat.webmanifest",
+  "static/favicon.svg",
+  "static/index.html",
+  "static/style.css",
+]
