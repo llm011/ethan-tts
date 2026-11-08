@@ -85,7 +85,7 @@ MODELS = {
         "directory": "Qwen3-TTS-12Hz-0.6B-CustomVoice-4bit",
         "kind": "custom",
         "role": "tts",
-        "size_gb": 1.6,
+        "size_gb": 1.7,
         "description": "默认。预设音色与方言，速度和内存的最佳平衡。",
     },
     "design-1.7b-4bit": {
@@ -94,7 +94,7 @@ MODELS = {
         "directory": "Qwen3-TTS-12Hz-1.7B-VoiceDesign-4bit",
         "kind": "design",
         "role": "tts",
-        "size_gb": 0,
+        "size_gb": 2.3,
         "description": "可选。根据文字描述创建声音，比默认模型更占内存。",
     },
     "base-0.6b-4bit": {
@@ -103,7 +103,7 @@ MODELS = {
         "directory": "Qwen3-TTS-12Hz-0.6B-Base-4bit",
         "kind": "clone",
         "role": "tts",
-        "size_gb": 0,
+        "size_gb": 1.7,
         "description": "可选。用参考音频克隆音色，需要同时提供准确逐字稿。",
     },
     # Speech-to-text, used by the voice chat page before every model call.
@@ -114,7 +114,7 @@ MODELS = {
         "kind": "asr",
         "family": "qwen3-asr",
         "role": "asr",
-        "size_gb": .9,
+        "size_gb": .7,
         "description": "默认。中英日韩多语种，短句识别准、延迟低。",
     },
     "whisper-turbo-4bit": {

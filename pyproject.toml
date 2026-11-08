@@ -37,9 +37,10 @@ py-modules = [
   "stt", "llm", "chat", "setup_cmd",
 ]
 
-# 网页界面（static/）必须打进 wheel，否则 pip/uv 装完打开 8765 是空白页。
-# setuptools 对 py-modules 不会自动收顶层目录下的非 .py 文件，只能显式声明：
-# 把它当 data-files 挂到包的安装前缀下，路径与 app.py 里的 ROOT / "static" 一致。
+# static/ 必须真的进 wheel，否则装完打开 8765 是空白页 / /chat.webmanifest 报 500。
+# 注意：py-modules 布局下 `[tool.setuptools.package-data]` 是**不生效**的
+# （它只作用于真正的 package），必须用 data-files 显式声明。
+# 装在 sys.prefix/static，config.STATIC_DIR 会按「源码目录 → sys.prefix」查找。
 [tool.setuptools.data-files]
 "static" = [
   "static/app.js",
@@ -49,5 +50,6 @@ py-modules = [
   "static/chat.webmanifest",
   "static/favicon.svg",
   "static/index.html",
+  "static/select.js",
   "static/style.css",
 ]
