@@ -13,8 +13,13 @@
   function place(popup, trigger) {
     const rect = trigger.getBoundingClientRect();
     const gap = 6;
-    popup.style.minWidth = `${Math.max(rect.width, 170)}px`;
-    popup.style.left = `${Math.min(rect.left, window.innerWidth - popup.offsetWidth - 12)}px`;
+    const margin = 12;
+    // Long voice names must not push the popup past the viewport edge.
+    const maxWidth = Math.max(160, window.innerWidth - margin * 2);
+    popup.style.maxWidth = `${maxWidth}px`;
+    popup.style.minWidth = `${Math.min(Math.max(rect.width, 170), maxWidth)}px`;
+    const left = Math.max(margin, Math.min(rect.left, window.innerWidth - popup.offsetWidth - margin));
+    popup.style.left = `${left}px`;
     const below = window.innerHeight - rect.bottom;
     const needed = popup.offsetHeight + gap + 12;
     if (below < needed && rect.top > needed) {
