@@ -32,14 +32,20 @@ from config import (
     TTS_MODELS, VOICE_DIR,
 )
 from engine import (
-    CancelledError, SynthesisParams, apply_pronunciations, engine, model_installed,
-    model_size_bytes, resolve_model_key, stream_wav_header,
+    CancelledError, QueueTimeout, SynthesisParams, apply_pronunciations, engine,
+    model_installed, model_size_bytes, resolve_model_key, stream_wav_header,
 )
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     db.init_db()
+    # 上次进程异常退出（崩溃 / kill -9 / 机器重启）时，正在跑的任务会永远停在
+    # running，队列也不会再推进。启动时统一标成 interrupted，避免它们看起来
+    # 像"还在进行"，也避免前端一直转圈。
+    orphaned = db.reap_orphan_tasks()
+    if orphaned:
+        db.log("WARNING", "task", f"启动时回收 {orphaned} 个中断任务")
     engine.start_worker()
     db.log("INFO", "system", "管理服务已启动（模型按需加载）")
     try:
@@ -48,6 +54,10 @@ async def lifespan(_: FastAPI):
         engine.stop_worker()
         db.log("INFO", "system", "管理服务已停止")
 
+
+# 同步合成的排队上限：超过就返回 503，而不是让客户端无限等。
+# 默认 180s（比 CLI 的 300s HTTP 超时短，保证服务端先给出可读错误）。
+QUEUE_TIMEOUT_SEC = float(os.environ.get("ETHAN_TTS_QUEUE_TIMEOUT", "180"))
 
 app = FastAPI(title="ethan-tts", lifespan=lifespan)
 
@@ -391,7 +401,7 @@ def synthesize(req: SynthesisRequest) -> Response:
     db.update_task(task_id, status="running", started_at=db.now())
     started = time.monotonic()
     try:
-        result = engine.generate_file(params, task_id)
+        result = engine.generate_file(params, task_id, queue_timeout=QUEUE_TIMEOUT_SEC)
         db.add_artifact(result)
         db.update_task(task_id, status="succeeded", artifact_id=result["id"], finished_at=db.now(),
                        duration_seconds=result["generation_seconds"])
@@ -410,6 +420,9 @@ def synthesize(req: SynthesisRequest) -> Response:
         db.log("ERROR", "task", f"同步合成失败：{exc}", task_id)
         if isinstance(exc, HTTPException):
             raise
+        if isinstance(exc, QueueTimeout):
+            # 503 而非 500：这是「忙」不是「坏」，客户端可安全重试。
+            raise HTTPException(503, str(exc)) from exc
         raise HTTPException(500, str(exc)) from exc
 
 
@@ -1043,6 +1056,13 @@ def chat_speak(req: SynthesisRequest) -> StreamingResponse:
 if __name__ == "__main__":
     import argparse
     import uvicorn
+
+    from config import PID_FILE
+    from single_instance import acquire_or_exit
+
+    # 必须在 import 重量级模块 / 加载模型之前拿锁：并发拉起的第二份进程
+    # 会在这里立刻退出，而不是先吃满内存再争端口。
+    _instance_lock = acquire_or_exit(PID_FILE)
 
     parser = argparse.ArgumentParser(description="ethan-tts 本地语音管理台")
     parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"),

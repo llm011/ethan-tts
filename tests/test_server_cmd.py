@@ -120,3 +120,11 @@ def test_parser_exposes_server_subcommands():
     assert args.func is cli.cmd_server and args.action == "install"
     args = cli.build_parser().parse_args(["server", "status", "--json"])
     assert args.json is True and args.action == "status"
+
+
+def test_lock_file_is_not_the_pid_file():
+    """锁文件和 pid 文件必须分开：一个做 flock，一个存 Popen 的 pid。"""
+    import config
+    assert config.PID_FILE.name == "server.lock"
+    assert server.PID_PATH.name == "server.pid"
+    assert config.PID_FILE != server.PID_PATH
