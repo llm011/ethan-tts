@@ -25,6 +25,8 @@ def test_plist_is_valid_and_has_keepalive(monkeypatch):
     parsed = plistlib.loads(raw.encode())
 
     assert parsed["Label"] == server.LABEL
+    # 不能随安装时的 cwd 走：在 /tmp 装过会把工作目录固化成 /private/tmp
+    assert parsed["WorkingDirectory"] == str(server.HOME_DIR)
     assert parsed["ProgramArguments"][-2:] == ["--port", "8765"]
     # 登录自启 + 崩溃重启是这次的两个核心诉求
     assert parsed["RunAtLoad"] is True

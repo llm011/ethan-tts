@@ -116,7 +116,10 @@ def plist_content() -> str:
     ]
     for part in _command():
         lines.append(f"    <string>{_xml_escape(part)}</string>")
-    lines += ["  </array>", f"  <key>WorkingDirectory</key><string>{_xml_escape(str(Path.cwd()))}</string>"]
+    # 固定到用户目录：不能随安装时的 cwd 走。实测在 /tmp 里安装会把
+    # WorkingDirectory 固化成 /private/tmp，launchd 直接 bootstrap 失败。
+    lines += ["  </array>",
+              f"  <key>WorkingDirectory</key><string>{_xml_escape(str(HOME_DIR))}</string>"]
     env = _environment()
     if env:
         lines.append("  <key>EnvironmentVariables</key>")
