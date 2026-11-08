@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -116,3 +117,43 @@ def test_parser_accepts_common_agent_flags():
     ])
     assert args.json is True and args.autostart is False
     assert args.voice == "薇薇安" and args.out == "a.wav"
+
+
+def test_startup_guard_serializes_concurrent_spawn(tmp_path, monkeypatch):
+    """并发 CLI 不应该各自 Popen 一份 app.py。"""
+    import threading
+    from contextlib import contextmanager
+
+    spawns = []
+    lock = threading.Lock()
+
+    monkeypatch.setattr(cli, "DATA_DIR", tmp_path)
+    ready = {"at": None}
+
+    def slow_is_up(base):
+        # 模拟真实时序：spawn 之后服务要过一会儿才 ready。
+        return ready["at"] is not None and time.monotonic() >= ready["at"]
+
+
+    def fake_spawn(base):
+        with lock:
+            spawns.append(base)
+
+    def fake_wait(base):
+        ready["at"] = time.monotonic() + .3
+        time.sleep(.3)
+
+    monkeypatch.setattr(cli, "is_up", slow_is_up)
+    monkeypatch.setattr(cli, "_spawn_server", fake_spawn)
+    monkeypatch.setattr(cli, "_wait_until_up", fake_wait)
+
+    threads = [
+        threading.Thread(target=cli.ensure_server, args=("http://127.0.0.1:8765", True))
+        for _ in range(5)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    # 只有一个线程真正去拉起进程，其余等到锁后看到服务已在运行。
+    assert len(spawns) == 1
