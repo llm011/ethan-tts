@@ -24,14 +24,22 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import wave
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - 非 POSIX 平台退化为无锁
+    fcntl = None  # type: ignore[assignment]
 
 # setup / doctor 必须能在依赖坏掉时仍然跑起来，所以它们不 import engine，
 # 也就不能塞进这个已经依赖 httpx 的模块里。
 from setup_cmd import cmd_doctor, cmd_setup
 
 ROOT = Path(__file__).resolve().parent
+from config import DATA_DIR, LOG_DIR  # noqa: E402  (需在 ROOT 之后，避免循环)
+
 DEFAULT_URL = os.environ.get("ETHAN_TTS_URL", "http://127.0.0.1:8765")
 STARTUP_TIMEOUT = float(os.environ.get("ETHAN_TTS_STARTUP_TIMEOUT", "90"))
 
@@ -99,25 +107,58 @@ def ensure_server(base: str, autostart: bool) -> None:
         )
     if not autostart:
         raise ApiError(
-            f"服务未运行（{base}）。先执行 `ethan-tts serve`，或加 --autostart。"
+            f"服务未运行（{base}）。先执行 `ethan-tts server start`，或加 --autostart。"
         )
+    # 并发调用时两个 CLI 都会在 is_up() 判定「没在跑」，然后各自 Popen。
+    # 先抢一把「启动锁」把这段串行化：抢到的去拉起进程，没抢到的等它探活成功。
+    # 这样不会再出现两份 app.py 同时初始化、其中一份卡在 MLX 里吃内存的情况。
+    with _startup_guard():
+        if is_up(base):  # 等锁期间可能已被别人拉起来了
+            return
+        _spawn_server(base)
+        # 必须等它就绪再放锁：锁一放，后面的进程会复查 is_up，而服务此刻
+        # 还没 bind 端口，于是又各自 spawn 一份（实测 5 并发会起 5 个）。
+        _wait_until_up(base)
+
+
+@contextmanager
+def _startup_guard():
+    """独占的「正在启动」标记，避免并发 CLI 各自拉起一份 app.py。"""
+    guard = DATA_DIR / "startup.lock"
+    guard.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(guard, "a+", encoding="utf-8")
+    try:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)  # 阻塞等：别人正在启动就排队
+        yield
+    finally:
+        try:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+def _spawn_server(base: str) -> None:
     python = ROOT / ".venv" / "bin" / "python"
     interpreter = str(python) if python.exists() else sys.executable
-    log_dir = ROOT / "data" / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
     port = str(base_port(base))
-    with (log_dir / "server.log").open("ab") as log:
+    with (LOG_DIR / "server.log").open("ab") as log:
         subprocess.Popen(
             [interpreter, str(ROOT / "app.py"), "--host", "127.0.0.1", "--port", port],
             cwd=ROOT, stdout=log, stderr=log, stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
+
+
+def _wait_until_up(base: str) -> None:
     deadline = time.monotonic() + STARTUP_TIMEOUT
     while time.monotonic() < deadline:
         if is_up(base):
             return
         time.sleep(.3)
-    raise ApiError(f"服务启动超时，请查看 {log_dir / 'server.log'}")
+    raise ApiError(f"服务启动超时，请查看 {LOG_DIR / 'server.log'}")
 
 
 # ------------------------------------------------------------------ helpers
@@ -556,6 +597,88 @@ def cmd_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+# ------------------------------------------------------------------ server
+
+def cmd_server(args: argparse.Namespace) -> int:
+    """托管模式：install 之后浏览器无需先跑 CLI 也能打开。"""
+    import server_cmd as server
+
+    action = args.action
+    url = args.base
+    if action == "install":
+        if not server.is_macos():
+            raise ApiError("自动托管（开机自启）目前仅支持 macOS；其它平台可用 "
+                           "`ethan-tts server start` 的 pid 模式")
+        ok, detail = server.install_launchd()
+        if not ok:
+            raise ApiError(f"安装失败：{detail}")
+        ready = server.wait_ready(url, seconds=45)
+        emit({"installed": True, "plist": detail, "running": ready}, args.json,
+             human=f"已安装并注册开机自启：{detail}\n"
+                   f"服务{'已就绪' if ready else '正在启动，稍后用 server status 确认'}")
+        return 0
+
+    if action == "uninstall":
+        ok, detail = server.uninstall_launchd()
+        if not ok:
+            raise ApiError(detail)
+        emit({"installed": False}, args.json, human=detail)
+        return 0
+
+    if action == "start":
+        if server.backend() == "launchd":
+            ok, detail = server.start_launchd()
+        else:
+            ok, detail = server.start_pid()
+        if not ok:
+            raise ApiError(detail)
+        ready = server.wait_ready(url, seconds=45)
+        emit({"running": ready, "detail": detail}, args.json, human=f"{detail}，{'已就绪' if ready else '启动中'}")
+        return 0
+
+    if action == "stop":
+        if server.backend() == "launchd":
+            ok, detail = server.stop_launchd()
+        else:
+            ok, detail = server.stop_pid()
+        if not ok:
+            raise ApiError(detail)
+        emit({"running": False, "detail": detail}, args.json, human=detail)
+        return 0
+
+    if action == "restart":
+        if server.backend() == "launchd":
+            server.stop_launchd()
+            time.sleep(.5)
+            ok, detail = server.start_launchd()
+        else:
+            server.stop_pid()
+            ok, detail = server.start_pid()
+        if not ok:
+            raise ApiError(detail)
+        ready = server.wait_ready(url, seconds=45)
+        emit({"running": ready, "detail": detail}, args.json,
+             human=f"已重启，{'已就绪' if ready else '启动中'}")
+        return 0
+
+    # status
+    info = server.status(url)
+    if args.json:
+        emit(info, True)
+    else:
+        print(f"地址：{info['url']}")
+        print(f"运行：{'是' if info['running'] else '否'}")
+        print(f"托管：{info['backend']}" + ("（已安装开机自启）" if info["installed"] else "（未安装）"))
+        if info.get("plist"):
+            print(f"配置：{info['plist']}")
+        if info.get("launchd_loaded") is not None:
+            print(f"launchd：{'已加载' if info['launchd_loaded'] else '未加载'}")
+        if info.get("models_loaded") is not None:
+            print(f"已加载模型：{', '.join(info['models_loaded']) or '无'}")
+            print(f"Metal 活跃内存：{info.get('metal_active_gb')} GB")
+    return 0 if info["running"] else 1
+
+
 # ------------------------------------------------------------------ parser
 
 
@@ -677,6 +800,20 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor", parents=[common],
                             help="体检：环境、依赖、模型、服务是否正常")
     doctor.set_defaults(func=cmd_doctor)
+
+    server = sub.add_parser("server", parents=[common],
+                            help="托管服务：install/start/stop/restart/status/uninstall")
+    server_sub = server.add_subparsers(dest="action", required=True)
+    for name, help_text in (
+        ("install", "安装开机自启（macOS launchd）"),
+        ("uninstall", "移除开机自启"),
+        ("start", "启动服务"),
+        ("stop", "停止服务"),
+        ("restart", "重启服务"),
+        ("status", "查看托管状态"),
+    ):
+        sub_parser = server_sub.add_parser(name, parents=[common], help=help_text)
+        sub_parser.set_defaults(func=cmd_server, action=name)
 
     status = sub.add_parser("status", help="查看服务与资源状态", parents=[common])
     status.set_defaults(func=cmd_status)

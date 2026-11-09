@@ -244,6 +244,10 @@ def model_size_bytes(model_key: str) -> int:
     )
 
 
+class QueueTimeout(RuntimeError):
+    """等锁（排队）超过上限：前面的任务把推理占用太久。"""
+
+
 class CancelledError(RuntimeError):
     pass
 
@@ -337,11 +341,23 @@ class TTSEngine:
         options["speaker"] = p.voice["speaker"]
         return model.generate_custom_voice(**options)
 
-    def synthesize(self, p: SynthesisParams, cancelled=None) -> Iterator[bytes]:
+    def synthesize(self, p: SynthesisParams, cancelled=None, queue_timeout=None) -> Iterator[bytes]:
         """Yield complete audio per sentence in sync mode, small chunks in stream mode."""
         # MLX generation and the model registry are not safe for concurrent
         # requests. A single inference at a time also bounds peak memory.
-        with self._lock:
+        #
+        # queue_timeout：等锁（排队）上限。之前的实现是无限等——前面的任务
+        # 若卡在大模型推理上，后来的请求会一直占着连接和线程，客户端超时断开
+        # 后服务端仍在等，任务状态永远停在 running。给排队一个上限，超时立刻
+        # 失败并给出可读原因。
+        if queue_timeout is not None and not self._lock.acquire(timeout=queue_timeout):
+            raise QueueTimeout(
+                f"排队等待超过 {queue_timeout:.0f}s，前面的任务仍未完成；"
+                "请稍后重试，或先调用 /api/models/unload 释放模型内存"
+            )
+        if queue_timeout is None:
+            self._lock.acquire()
+        try:
             model = self.load(p.model_key)
             for sentence in split_sentences(p.speakable_text(), p.sentence_chars):
                 if cancelled and cancelled():
@@ -395,11 +411,19 @@ class TTSEngine:
                         ))
                 if cancelled and cancelled():
                     raise CancelledError("任务已取消")
+        finally:
+            # 无论是正常结束、取消还是异常，都必须释放推理锁，否则后续请求
+            # 会一直卡在排队上（原来用 with，改成手动 acquire 后要自己兜住）。
+            self._lock.release()
 
-    def generate_file(self, p: SynthesisParams, task_id: str | None = None) -> dict:
+    def generate_file(
+        self, p: SynthesisParams, task_id: str | None = None, queue_timeout=None
+    ) -> dict:
         started = time.monotonic()
         chunks: list[bytes] = []
-        for chunk in self.synthesize(p, lambda: self.is_cancelled(task_id)):
+        for chunk in self.synthesize(
+            p, lambda: self.is_cancelled(task_id), queue_timeout=queue_timeout
+        ):
             chunks.append(chunk)
         raw = b"".join(chunks)
         if not raw:

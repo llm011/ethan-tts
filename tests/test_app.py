@@ -80,7 +80,7 @@ def test_speed_is_exposed_on_the_api(client, monkeypatch):
     monkeypatch.setattr(application, "model_installed", lambda _: True)
     captured = {}
 
-    def fake_generate(params, task_id):
+    def fake_generate(params, task_id, queue_timeout=None):
         captured["speed"] = params.speed
         raise RuntimeError("stop after capturing")
 
@@ -126,7 +126,7 @@ def test_voice_crud_and_validation(client):
 def test_synthesize_with_fake_engine(client, monkeypatch):
     monkeypatch.setattr(application, "model_installed", lambda _: True)
 
-    def fake_generate(params, task_id):
+    def fake_generate(params, task_id, queue_timeout=None):
         artifact_id = uuid.uuid4().hex[:12]
         filename = f"{artifact_id}.wav"
         with wave.open(str(ARTIFACT_DIR / filename), "wb") as wav:
@@ -341,3 +341,55 @@ def test_static_assets_are_served(client):
     assert "CustomSelect" in script.text
     css = client.get("/static/style.css")
     assert ".cs-popup" in css.text and ".cs-trigger" in css.text
+
+
+def test_reap_orphan_tasks_on_startup(client):
+    """启动时把上次遗留的 running/queued 标成 interrupted。
+
+    进程被 kill -9 或机器重启后，任务会永远停在 running：队列没推进者，
+    前端却一直转圈。lifespan 里统一收尾即可。
+    """
+    running_id = db.create_task("中断在跑的任务。", "preset:Vivian", "custom-0.6b-4bit", {})
+    db.update_task(running_id, status="running")
+    queued_id = db.create_task("还排着队的任务。", "preset:Vivian", "custom-0.6b-4bit", {})
+    db.update_task(queued_id, status="queued")
+    done_id = db.create_task("已经完成的任务。", "preset:Vivian", "custom-0.6b-4bit", {})
+    db.update_task(done_id, status="succeeded")
+
+    reaped = db.reap_orphan_tasks()
+
+    assert reaped == 2
+    assert db.task(running_id)["status"] == "interrupted"
+    assert db.task(queued_id)["status"] == "interrupted"
+    assert db.task(done_id)["status"] == "succeeded", "已成功的任务不能被误伤"
+    assert "重启" in (db.task(running_id)["error"] or "")
+
+
+def test_queue_timeout_returns_503(client, monkeypatch):
+    """排队超时要返回 503（可重试），而不是 500（像是代码坏了）。"""
+    from engine import QueueTimeout
+
+    # 不绕过模型安装检查的话，请求会先撞上 409「请先下载模型」。
+    monkeypatch.setattr(application, "model_installed", lambda _: True)
+
+    def fake_generate(params, task_id, queue_timeout=None):
+        raise QueueTimeout("排队等待超过 1s")
+
+    monkeypatch.setattr(application.engine, "generate_file", fake_generate)
+
+    response = client.post("/api/tts", json={"text": "测试。", "voice_id": "preset:Vivian"})
+
+    assert response.status_code == 503
+    assert "排队" in response.json()["detail"]
+
+
+def test_queue_timeout_default_allows_batch_synthesis():
+    """默认排队上限要够正常批量用。
+
+    回归背景：默认曾设 180s，而本地克隆音色单节约 60s——3 节并发时最后一节
+    等到 120s+ 就被判超时，正常任务被误杀成 503。这个值只该兜「卡死」。
+    """
+    assert application.QUEUE_TIMEOUT_SEC >= 600, (
+        "排队上限太小会误杀正常批量合成；书稿类管线一次并发 3–10 节，"
+        "本地克隆音色单节约 60s"
+    )

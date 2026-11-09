@@ -72,9 +72,13 @@ def remembered_model_roots() -> list[Path]:
     """
     try:
         data = json.loads(MODEL_ROOTS_FILE.read_text(encoding="utf-8"))
-        return [Path(item) for item in data.get("roots", []) if Path(item).is_dir()]
     except (OSError, ValueError):
         return []
+    # 兼容两种历史写法：{"roots": [...]} 和裸列表。解析失败绝不能影响启动。
+    items = data.get("roots", []) if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return []
+    return [Path(item) for item in items if isinstance(item, str) and Path(item).is_dir()]
 
 
 def remember_model_root(path: Path) -> None:
@@ -115,6 +119,11 @@ DB_PATH = DATA_DIR / "ethan_tts.db"
 ARTIFACT_DIR = DATA_DIR / "artifacts"
 VOICE_DIR = DATA_DIR / "voices"
 LOG_DIR = DATA_DIR / "logs"
+# 单实例锁：服务启动时独占，防止并发 CLI 各自 Popen 出多个 app.py。
+# 刻意和 server_cmd.PID_PATH 分开：那个文件存的是「Popen 出来的 pid」，
+# 供 start/stop 用；这个文件只做 flock 互斥，写进去的是持锁进程自己的 pid。
+# 两个模块共用同一路径会互相覆盖，语义也容易混淆。
+PID_FILE = DATA_DIR / "server.lock"
 MODEL_DIR = _pick("models", "ETHAN_TTS_MODEL_DIR", ROOT / "models")
 MODEL_ROOTS = model_roots()
 
