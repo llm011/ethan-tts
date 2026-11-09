@@ -193,12 +193,69 @@ def start_launchd() -> tuple[bool, str]:
 
 
 def stop_launchd(kill: bool = False) -> tuple[bool, str]:
-    """停掉服务但保留托管：KeepAlive 会让它自己起来，所以用 bootout 下掉。"""
+    """停掉服务但保留托管：KeepAlive 会让它自己起来，所以用 bootout 下掉。
+
+    bootout 只是「让 launchd 别再管」，已经跑起来的子进程不一定立刻退出；
+    如果它正卡在推理/初始化里，会变成 PPID=1 的孤儿继续占着 8765 端口。
+    之后 restart 起的「新」进程绑定失败，`launchctl list` 里状态是 `- 2`，
+    而 health 探测仍然成功——因为回话的是那个孤儿。
+
+    实测踩过：restart 报「已重启，已就绪」，但 PID 一天没变，跑的还是旧代码。
+    所以 bootout 之后要等端口真正释放；超时就用 SIGTERM 兜底。
+    """
     domain = f"gui/{os.getuid()}/{LABEL}"
     if not launchd_loaded():
         return True, "服务未在运行"
     _launchctl("bootout", domain)
-    return True, "已停止（launchd）"
+    if _wait_port_free(timeout=10.0):
+        return True, "已停止（launchd）"
+    # 还占着端口：说明有孤儿进程，按端口精确清理（只杀监听该端口的进程）。
+    killed = _kill_port_listener()
+    if _wait_port_free(timeout=10.0):
+        return True, f"已停止（launchd，清理了 {killed} 个残留进程）"
+    return False, (
+        f"服务未能停止：端口 {default_port()} 仍被占用，请手动检查 "
+        f"`lsof -i :{default_port()}`"
+    )
+
+
+def _wait_port_free(timeout: float) -> bool:
+    """等监听端口释放；用于确认 bootout 真的把进程带走了。"""
+    import socket
+    import time as _time
+
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.3)
+            if sock.connect_ex(("127.0.0.1", default_port())) != 0:
+                return True
+        _time.sleep(0.3)
+    return False
+
+
+def _kill_port_listener() -> int:
+    """按端口找监听进程并发 SIGTERM，返回杀掉的数量。
+
+    不用 pkill -f app.py：那会误杀别的 worktree / 别的实例。
+    """
+    import signal
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f":{default_port()}"], capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return 0
+    killed = 0
+    for raw in result.stdout.split():
+        try:
+            os.kill(int(raw), signal.SIGTERM)
+            killed += 1
+        except (ValueError, OSError):
+            continue
+    return killed
 
 
 # ------------------------------------------------------------------ pid 退化方案
