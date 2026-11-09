@@ -265,3 +265,33 @@ def test_remember_model_root_is_idempotent(tmp_path, monkeypatch):
     finally:
         monkeypatch.delenv("ETHAN_TTS_DIR")
         importlib.reload(config)
+
+
+def test_remembered_roots_accepts_legacy_dict_format(tmp_path, monkeypatch):
+    """旧版写的是 {"roots": [...]}，新版写裸列表——两种都得能读。
+
+    读不出来的后果不是报错而是**静默丢记录**：装成 wheel 的用户会以为权重没下过，
+    然后白下 4 GB。所以兼容旧格式。
+    """
+    import importlib
+    import json
+
+    import config
+
+    home = tmp_path / "home"
+    home.mkdir()
+    legacy = tmp_path / "legacy-models"
+    (legacy / "m").mkdir(parents=True)
+    (legacy / "m" / "model.safetensors").write_bytes(b"x")
+
+    (home / "model-roots.json").write_text(
+        json.dumps({"roots": [str(legacy)]}), encoding="utf-8")
+
+    monkeypatch.setenv("ETHAN_TTS_DIR", str(home))
+    monkeypatch.delenv("ETHAN_TTS_MODEL_DIR", raising=False)
+    reloaded = importlib.reload(config)
+    try:
+        assert legacy.resolve() in reloaded.MODEL_ROOTS
+    finally:
+        monkeypatch.delenv("ETHAN_TTS_DIR")
+        importlib.reload(config)
