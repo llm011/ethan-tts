@@ -212,3 +212,56 @@ def test_setup_cmd_finds_model_in_any_root(monkeypatch, tmp_path):
     monkeypatch.setattr(setup_cmd, "MODEL_ROOTS", [tmp_path / "empty-home", fake_root])
     assert setup_cmd._model_location(setup_cmd.DEFAULT_MODEL) == target
     assert setup_cmd.DEFAULT_MODEL in setup_cmd._installed_models()
+
+
+def test_remembered_roots_survive_install_shape_change(tmp_path, monkeypatch):
+    """装成 wheel 后 ROOT 变成 site-packages，必须靠记录找回源码旁的旧权重。
+
+    真实踩过：clone 安装时有 4 GB 权重，换成 uv tool 安装后 doctor 报「未下载」——
+    因为 ROOT/"models" 现在指向 site-packages 里一个不存在的地方。
+    """
+    import importlib
+    import json
+
+    import config
+
+    home = tmp_path / "home"
+    home.mkdir()
+    legacy = tmp_path / "legacy-models"
+    (legacy / "some-model").mkdir(parents=True)
+    (legacy / "some-model" / "model.safetensors").write_bytes(b"x")
+
+    (home / "model-roots.json").write_text(json.dumps([str(legacy)]), encoding="utf-8")
+
+    monkeypatch.setenv("ETHAN_TTS_DIR", str(home))
+    monkeypatch.delenv("ETHAN_TTS_MODEL_DIR", raising=False)
+    reloaded = importlib.reload(config)
+    try:
+        assert legacy.resolve() in reloaded.MODEL_ROOTS, "记录过的目录必须进候选"
+    finally:
+        monkeypatch.delenv("ETHAN_TTS_DIR")
+        importlib.reload(config)
+
+
+def test_remember_model_root_is_idempotent(tmp_path, monkeypatch):
+    """同一个目录记两次不该重复写。"""
+    import importlib
+    import json
+
+    import config
+
+    home = tmp_path / "home"
+    home.mkdir()
+    target = tmp_path / "m"
+    target.mkdir()
+
+    monkeypatch.setenv("ETHAN_TTS_DIR", str(home))
+    reloaded = importlib.reload(config)
+    try:
+        reloaded.remember_model_root(target)
+        reloaded.remember_model_root(target)
+        saved = json.loads((home / "model-roots.json").read_text(encoding="utf-8"))
+        assert saved.count(str(target.resolve())) == 1
+    finally:
+        monkeypatch.delenv("ETHAN_TTS_DIR")
+        importlib.reload(config)
