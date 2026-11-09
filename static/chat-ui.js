@@ -165,15 +165,19 @@ function messageHtml(message) {
 }
 
 function appendLive(role, text = "") {
-  const el = document.createElement("div");
-  el.className = `msg ${role}`;
-  el.dataset.live = "1";
-  el.innerHTML = `<div class="avatar">${role === "user" ? "我" : "e"}</div>
-    <div class="bubble">${esc(text)}<span class="caret"></span></div>`;
-  $("thread").append(el);
+  // 和历史消息保持同一套结构：外层 .msg-block 负责宽度与居中，
+  // 否则流式气泡会贴着左边缘铺满整行。
+  const block = document.createElement("div");
+  block.className = "msg-block";
+  block.dataset.live = "1";
+  block.innerHTML = `<div class="msg ${role}">
+      <div class="avatar">${role === "user" ? "我" : "e"}</div>
+      <div class="bubble">${esc(text)}<span class="caret"></span></div>
+    </div>`;
+  $("thread").append(block);
   syncHeroMode();
   scrollThread();
-  return el;
+  return block;
 }
 function liveBubble(el, text) {
   el.querySelector(".bubble").innerHTML = `${esc(text)}<span class="caret"></span>`;
