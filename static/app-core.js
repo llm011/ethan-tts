@@ -124,7 +124,23 @@ $("voice-grid").addEventListener("click", async e => {
   const use = e.target.closest("[data-use-voice]"), edit = e.target.closest("[data-edit-voice]"), favorite = e.target.closest("[data-favorite]");
   if (use) { navigate("studio"); $("synth-voice").value = use.dataset.useVoice; updateSelectedVoice(); $("synth-text").focus(); }
   if (edit) openVoiceModal(state.voices.find(v => v.id === edit.dataset.editVoice));
-  if (favorite) { const v = state.voices.find(v => v.id === favorite.dataset.favorite); await api(`/api/voices/${v.id}`, {method:"PATCH",body:JSON.stringify({is_favorite:!v.is_favorite})}); loadVoices(); }
+  if (favorite) {
+    // 就地更新星标，不重拉列表：收藏不再影响排序，重拉反而会让卡片跳动，
+    // 用户会以为自己点错了。
+    const v = state.voices.find(v => v.id === favorite.dataset.favorite);
+    if (!v) return;
+    const next = !v.is_favorite;
+    favorite.classList.toggle("active", next);
+    favorite.textContent = next ? "★" : "☆";
+    try {
+      await api(`/api/voices/${v.id}`, {method:"PATCH", body:JSON.stringify({is_favorite: next})});
+      v.is_favorite = next;
+    } catch (e) {
+      favorite.classList.toggle("active", !next);   // 失败回滚
+      favorite.textContent = !next ? "★" : "☆";
+      toast(e.message, true);
+    }
+  }
 });
 
 function updateCount() { $("char-count").textContent = $("synth-text").value.length; }

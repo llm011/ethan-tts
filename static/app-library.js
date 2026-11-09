@@ -118,12 +118,45 @@ function closeVoiceModal(){$("voice-modal").hidden=true;}
 $("new-voice-btn").addEventListener("click",()=>openVoiceModal());$("close-voice-modal").addEventListener("click",closeVoiceModal);$("cancel-voice").addEventListener("click",closeVoiceModal);$("voice-modal").addEventListener("click",e=>{if(e.target===$("voice-modal"))closeVoiceModal();});
 $("delete-voice").addEventListener("click",async()=>{const id=$("edit-voice-id").value;if(!id||!confirm("确定删除这个自定义音色及其参考录音吗？已生成的音频会保留。"))return;try{await api(`/api/voices/${id}`,{method:"DELETE"});closeVoiceModal();toast("音色已删除");await loadVoices();}catch(e){$("voice-form-error").textContent=e.message;$("voice-form-error").hidden=false;}});
 document.querySelectorAll('input[name="voice-type"]').forEach(el=>el.addEventListener("change",()=>{const clone=document.querySelector('input[name="voice-type"]:checked').value==="clone";$("clone-fields").hidden=!clone;$("design-fields").hidden=clone;}));
+/* 音色保存要走的几步：建记录 → 上传录音 → 转码校验 → 刷新列表。
+   上传大文件时界面原本只有按钮文字变了，用户不知道卡在哪。 */
+const voiceProgress = {
+  timer: null, start: 0,
+  show(text, pct) {
+    $("voice-progress").hidden = false;
+    $("voice-progress-text").textContent = text;
+    $("voice-progress-bar").style.width = `${pct}%`;
+    if (!this.timer) {
+      this.start = performance.now();
+      this.timer = setInterval(() => {
+        $("voice-progress-time").textContent = `${((performance.now() - this.start) / 1000).toFixed(1)}s`;
+      }, 100);
+    }
+  },
+  hide() {
+    $("voice-progress").hidden = true;
+    $("voice-progress-bar").style.width = "0%";
+    $("voice-progress-time").textContent = "";
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+  },
+};
+
 $("voice-form").addEventListener("submit",async e=>{e.preventDefault();const id=$("edit-voice-id").value,existing=state.voices.find(v=>v.id===id);if(existing?.is_preset)return closeVoiceModal();setBusy("save-voice",true);$("voice-form-error").hidden=true;
-  try{let voice;if(id){voice=await api(`/api/voices/${id}`,{method:"PATCH",body:JSON.stringify({name:$("voice-name").value,description:$("voice-description").value,instruct:$("voice-instruct").value||null,reference_text:$("voice-reference-text").value||null})});}else{const kind=document.querySelector('input[name="voice-type"]:checked').value;voice=await api("/api/voices",{method:"POST",body:JSON.stringify({name:$("voice-name").value,kind,description:$("voice-description").value,instruct:$("voice-instruct").value||null,reference_text:$("voice-reference-text").value||null})});}
+  try{let voice;voiceProgress.show("正在保存音色信息…",15);
+    if(id){voice=await api(`/api/voices/${id}`,{method:"PATCH",body:JSON.stringify({name:$("voice-name").value,description:$("voice-description").value,instruct:$("voice-instruct").value||null,reference_text:$("voice-reference-text").value||null})});}else{const kind=document.querySelector('input[name="voice-type"]:checked').value;voice=await api("/api/voices",{method:"POST",body:JSON.stringify({name:$("voice-name").value,kind,description:$("voice-description").value,instruct:$("voice-instruct").value||null,reference_text:$("voice-reference-text").value||null})});}
     $("edit-voice-id").value=voice.id;
-    const file=$("voice-reference").files[0];if(file){const form=new FormData();form.append("file",file);form.append("reference_text",$("voice-reference-text").value);await api(`/api/voices/${voice.id}/reference`,{method:"POST",body:form});}else if(voice.kind==="clone"&&!voice.reference_path)throw new Error("音色已创建，请上传参考录音后再使用");
+    const file=$("voice-reference").files[0];
+    if(file){
+      const sizeMb=(file.size/1048576).toFixed(1);
+      voiceProgress.show(`正在上传录音（${sizeMb} MB）…`,45);
+      const form=new FormData();form.append("file",file);form.append("reference_text",$("voice-reference-text").value);
+      await api(`/api/voices/${voice.id}/reference`,{method:"POST",body:form});
+      voiceProgress.show("正在转码并校验时长…",85);
+    } else if(voice.kind==="clone"&&!voice.reference_path) throw new Error("音色已创建，请上传参考录音后再使用");
+    voiceProgress.show("正在刷新音色库…",95);
     closeVoiceModal();await loadVoices();await loadOverview();
     if(voice.kind!=="custom"){navigate("studio");$("synth-voice").value=voice.id;updateSelectedVoice();}
     const model=requiredModel(voice);toast(voice.kind!=="custom"&&model&&!model.installed?"音色信息已保存；还需下载对应模型才能合成":"音色已保存，可以开始合成");
-  }catch(e){$("voice-form-error").textContent=e.message;$("voice-form-error").hidden=false;}finally{setBusy("save-voice",false);}
+  }catch(e){$("voice-form-error").textContent=e.message;$("voice-form-error").hidden=false;}finally{voiceProgress.hide();setBusy("save-voice",false);}
 });

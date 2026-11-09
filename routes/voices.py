@@ -27,7 +27,7 @@ def list_voices(kind: str | None = None, q: str = "", favorite: bool = False) ->
     if favorite:
         clauses.append("is_favorite=1")
     with db.connect() as conn:
-        rows = conn.execute(f"SELECT * FROM voices WHERE {' AND '.join(clauses)} ORDER BY is_preset DESC,is_favorite DESC,created_at", params).fetchall()
+        rows = conn.execute(f"SELECT * FROM voices WHERE {' AND '.join(clauses)} ORDER BY is_preset DESC, created_at", params).fetchall()
     items = []
     for row in rows:
         item = dict(row)
