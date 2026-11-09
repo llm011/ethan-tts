@@ -128,3 +128,48 @@ def test_lock_file_is_not_the_pid_file():
     assert config.PID_FILE.name == "server.lock"
     assert server.PID_PATH.name == "server.pid"
     assert config.PID_FILE != server.PID_PATH
+
+
+def test_stop_launchd_waits_for_port_release(monkeypatch, tmp_path):
+    """bootout 之后必须确认端口真的释放了，不能立刻返回「已停止」。
+
+    回归背景：bootout 只是让 launchd 别再管，已跑起来的子进程可能卡在推理里
+    不退出，变成 PPID=1 的孤儿继续占着 8765。之后 restart 起的「新」进程绑定
+    失败，而 health 探测仍然成功——回话的是那个孤儿。实测 restart 报「已就绪」
+    但 PID 一天没变，跑的还是旧代码。
+    """
+    import server_cmd as sc
+
+    calls = {"waited": 0, "killed": False}
+
+    monkeypatch.setattr(sc, "launchd_loaded", lambda: True)
+    monkeypatch.setattr(sc, "_launchctl", lambda *a: None)
+
+    def fake_wait(timeout):
+        # 第一次（bootout 后）仍被占，清理后才释放 —— 复现孤儿场景
+        calls["waited"] += 1
+        return calls["waited"] > 1
+
+    monkeypatch.setattr(sc, "_wait_port_free", fake_wait)
+    monkeypatch.setattr(sc, "_kill_port_listener", lambda: calls.__setitem__("killed", True) or 1)
+
+    ok, detail = sc.stop_launchd()
+
+    assert calls["waited"], "必须等端口释放"
+    assert calls["killed"], "端口没释放时要清理残留进程"
+    assert ok
+
+
+def test_stop_launchd_reports_failure_when_port_stuck(monkeypatch):
+    """清理后端口仍被占，必须返回失败而不是假装成功。"""
+    import server_cmd as sc
+
+    monkeypatch.setattr(sc, "launchd_loaded", lambda: True)
+    monkeypatch.setattr(sc, "_launchctl", lambda *a: None)
+    monkeypatch.setattr(sc, "_wait_port_free", lambda timeout: False)
+    monkeypatch.setattr(sc, "_kill_port_listener", lambda: 0)
+
+    ok, detail = sc.stop_launchd()
+
+    assert not ok
+    assert "仍被占用" in detail
