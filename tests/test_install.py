@@ -32,6 +32,8 @@ def test_all_third_party_imports_are_declared():
     clone 开发时依赖是全的，只有从 wheel 装才会暴露漏声明。
     """
     local = {p.stem for p in ROOT.glob("*.py")}
+    # 本地包目录（routes/）不是第三方依赖
+    local |= {p.name for p in ROOT.iterdir() if p.is_dir() and (p / "__init__.py").exists()}
     stdlib = set(sys.stdlib_module_names)
     imported: set[str] = set()
     for source in ROOT.glob("*.py"):

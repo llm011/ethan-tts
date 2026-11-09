@@ -330,12 +330,15 @@ def test_streaming_applies_speed(client, monkeypatch):
 
 
 def test_static_assets_are_served(client):
-    """The custom select needs select.js reachable and loaded before app.js."""
+    """select.js must load before the console scripts that use it."""
     page = client.get("/")
     assert page.status_code == 200
     html = page.text
     assert '/static/select.js' in html
-    assert html.index('select.js') < html.index('app.js')
+    assert html.index('select.js') < html.index('app-core.js')
+    # The console is split into ordered chunks; all of them must be present.
+    for chunk in ('app-core.js', 'app-library.js', 'app-settings.js'):
+        assert chunk in html, chunk
     script = client.get("/static/select.js")
     assert script.status_code == 200
     assert "CustomSelect" in script.text

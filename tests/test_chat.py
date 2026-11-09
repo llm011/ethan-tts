@@ -243,4 +243,4 @@ def test_chat_session_deep_link_is_served(client):
     for path in ("/chat", "/chat/chat:8d07e76b0cab", "/chat/chat%3A8d07e76b0cab"):
         response = client.get(path)
         assert response.status_code == 200, path
-        assert "chat.js" in response.text
+        assert "chat-turn.js" in response.text

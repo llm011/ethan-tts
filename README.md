@@ -450,14 +450,31 @@ data/voices/          # 用户上传并转码的参考录音
 
 ```bash
 .venv/bin/python -m pytest              # 离线接口测试，不加载真实模型
-.venv/bin/python -m py_compile app.py config.py db.py engine.py download_model.py
-node --check static/app.js             # 如果本机安装了 Node.js
+.venv/bin/python -m py_compile *.py    # 或只编译改动的模块
+node --check static/app-core.js        # 前端已按功能拆分，逐个检查
 ```
 
 项目由标准库 SQLite、FastAPI、MLX Audio 和原生 HTML/CSS/JavaScript 组成，无前端构建步骤、无 Node 服务、无 Docker 容器、无外部数据库。
 
+**分层约定**：`app.py` 只做装配，不写业务逻辑；每条路由属于 `routes/` 下的一个领域模块；跨模块复用的校验与参数构造放 `deps.py`；请求模型统一在 `schemas.py`。单文件超过 700 行就该继续拆。
+
 ```text
-app.py                # HTTP API、请求校验与生命周期
+app.py                # 装配入口：app 对象、lifespan、静态挂载、路由注册
+routes/               # 按领域拆分的 HTTP 路由
+  pages.py            #   页面、局域网地址、PWA manifest、/health
+  voices.py           #   音色增删改与参考录音上传
+  synthesis.py        #   同步合成、流式合成、对话页复读
+  library.py          #   任务队列、音频产物、日志、读音纠正
+  models.py           #   模型清单、下载、内存释放
+  settings.py         #   偏好设置与总览统计
+  chat.py             #   语音对话：bootstrap、模型设置、会话、单轮
+schemas.py            # 请求/响应模型（API 契约集中一处）
+deps.py               # 音色校验与合成参数构造（多路由共用）
+model_registry.py     # 模型清单、体积探测与下载记账
+settings_store.py     # 启动时读取的环境开关
+web_assets.py         # 页面渲染与资源指纹
+single_instance.py    # flock 单实例锁
+server_cmd.py         # server install/start/stop/restart/status
 engine.py             # 模型管理、单并发推理、切句、PCM/WAV、后台队列
 stt.py                # 本地语音识别（Qwen3-ASR / Whisper），单模型常驻
 llm.py                # OpenAI 兼容的流式客户端，错误信息面向用户
@@ -465,6 +482,14 @@ chat.py               # 对话编排：ASR → 流式 LLM → 分句 → 逐句 
 db.py                 # SQLite 持久化（含对话会话与消息）
 config.py             # 模型注册表、默认音色、对话与提示词默认值
 static/               # 中文管理台 + /chat 语音对话页
+  app-core.js         #   工作台、音色、流式播放
+  app-library.js      #   产物、任务、日志、设置面板
+  app-settings.js     #   主题、读音纠正、对话设置、启动
+  chat-core.js        #   对话页公共部分
+  chat-audio.js       #   录音、VAD、Web Audio 播放
+  chat-ui.js          #   光球、消息流、会话列表
+  chat-turn.js        #   SSE 一轮对话与交互绑定
+  select.js           #   自建下拉框（替代系统弹出层）
 download_model.py     # 可断点续传的模型下载器
 tests/                # 使用假引擎/假模型的快速测试
 ```
