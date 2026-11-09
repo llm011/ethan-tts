@@ -192,6 +192,10 @@
   <div class="form-group"><label>声音描述 / 备注</label><input class="input" id="voice-description" maxlength="300" placeholder="便于在音色库中识别"></div>
   <div class="form-group" id="design-fields"><label>设计指令 <span>必填</span></label><textarea class="input" id="voice-instruct" placeholder="例如：成熟温柔的女声，语速适中，像深夜电台主持人"></textarea><p class="form-hint">使用 1.7B VoiceDesign 模型，需要单独下载。</p></div>
   <div class="form-group" id="clone-fields" hidden><label>参考录音</label><input type="file" id="voice-reference" accept=".wav,.mp3,.m4a,.flac,.ogg" class="input"><p class="form-hint">建议 10–20 秒、单人、无背景噪音，最大 20 MB。请确保已获得本人同意。</p><label>参考音频逐字稿 <span>必填</span></label><textarea class="input" id="voice-reference-text" placeholder="准确输入录音中说的内容"></textarea><p class="form-hint">保存时只做本地转码，不上传云端、不训练。首次合成由 0.6B Base 模型零样本提取音色；该模型与预设音色模型不同，需要单独下载。</p></div>
+  <div class="modal-progress" id="voice-progress" hidden>
+    <div class="mp-bar"><i id="voice-progress-bar"></i></div>
+    <div class="mp-text"><span id="voice-progress-text">准备中…</span><span id="voice-progress-time"></span></div>
+  </div>
   <div class="modal-error" id="voice-form-error" hidden></div><div class="modal-actions"><button type="button" class="button secondary danger-text" id="delete-voice" hidden>删除</button><button type="button" class="button secondary" id="cancel-voice">取消</button><button type="submit" class="button primary" id="save-voice">保存音色</button></div>
 </form></div></div>
 <div id="toast-container" aria-live="polite"></div>
