@@ -1,6 +1,7 @@
 """Central configuration. Runtime files are local and git-ignored."""
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -26,24 +27,100 @@ def _home_dir() -> Path:
     return Path.home() / ".local" / "share" / "ethan-tts"
 
 
-def _pick(name: str, env_key: str, legacy: Path) -> Path:
-    """选一个目录：显式环境变量 > 用户目录 > 源码旁边的老位置（它已经有内容时）。
+def _has_content(path: Path) -> bool:
+    """目录里到底有没有东西——只看 exists() 会被「建了但空」的目录骗到。
 
-    迁移友好：老用户 git clone 装的，models/ 里 1.6 GB 权重原样能用；
-    新用户走用户目录，不碰源码。
+    这个坑真实发生过：新版本第一次启动时创建了空的用户目录，之后判定
+    「用户目录存在」就优先用它，于是源码旁已经下好的 4 GB 权重全部显示成
+    「未下载」，安装流程又白白重下了一份。
+    """
+    try:
+        return path.is_dir() and any(path.iterdir())
+    except OSError:
+        return False
+
+
+def _pick(name: str, env_key: str, legacy: Path) -> Path:
+    """选目录：显式环境变量 > 已经有内容的用户目录 > 有内容的源码目录 > 用户目录。
+
+    迁移友好：老用户 clone 出来的 models/ 原样能用，不会因为升级而重新下载；
+    新用户走用户目录，不碰源码目录。
     """
     explicit = os.environ.get(env_key)
     if explicit:
         return Path(explicit).expanduser().resolve()
     home = _home_dir() / name
-    if home.exists():
+    if _has_content(home):
         return home
-    if legacy.exists():
+    if _has_content(legacy):
         return legacy
     return home
 
 
 HOME_DIR = _home_dir()
+
+
+MODEL_ROOTS_FILE = HOME_DIR / "model-roots.json"
+
+
+def _remembered_model_roots() -> list[Path]:
+    """以前用过的权重目录（跨安装形态记住）。
+
+    为什么需要它：从 clone 安装换成 uv tool 安装后，`ROOT` 变成 site-packages，
+    `ROOT / "models"` 指向一个根本不存在的地方——源码旁那 4 GB 权重就彻底找不到了。
+    所以源码运行时把「我的 models 在这」写下来，装成 wheel 后还能顺着记录找回去。
+    """
+    try:
+        raw = json.loads(MODEL_ROOTS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    roots: list[Path] = []
+    for item in raw if isinstance(raw, list) else []:
+        try:
+            path = Path(item).expanduser().resolve()
+        except (TypeError, ValueError):
+            continue
+        if path.is_dir() and path not in roots:
+            roots.append(path)
+    return roots
+
+
+def remember_model_root(path: Path) -> None:
+    """记下这个目录里有权重，供之后（可能换了安装形态的）进程复用。"""
+    path = path.resolve()
+    known = _remembered_model_roots()
+    if path in known:
+        return
+    known.append(path)
+    try:
+        MODEL_ROOTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        MODEL_ROOTS_FILE.write_text(
+            json.dumps([str(item) for item in known], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass  # 记不住不算错，下次照样能靠显式环境变量
+
+
+def model_roots() -> list[Path]:
+    """按优先级列出可以放权重的目录。
+
+    权重动辄数 GB，且老用户手里已经下好了一堆。单靠「哪个目录有内容」
+    会做出错误判断：新目录里只重下了一个模型，源码旁另外三个就被判成
+    「未下载」。所以按模型逐个找：谁先有这个模型就先用谁的。
+
+    顺序：显式环境变量 > 用户目录 > 历史记录过的目录 > 当前代码旁。
+    """
+    explicit = os.environ.get("ETHAN_TTS_MODEL_DIR")
+    if explicit:
+        return [Path(explicit).expanduser().resolve()]
+    roots: list[Path] = []
+    for root in [MODEL_DIR, *_remembered_model_roots(), ROOT / "models"]:
+        if root not in roots:
+            roots.append(root)
+    return roots
+
+
 DATA_DIR = _pick("data", "ETHAN_TTS_DATA_DIR", ROOT / "data")
 DB_PATH = DATA_DIR / "ethan_tts.db"
 ARTIFACT_DIR = DATA_DIR / "artifacts"
@@ -55,6 +132,12 @@ LOG_DIR = DATA_DIR / "logs"
 # 两个模块共用同一路径会互相覆盖，语义也容易混淆。
 PID_FILE = DATA_DIR / "server.lock"
 MODEL_DIR = _pick("models", "ETHAN_TTS_MODEL_DIR", ROOT / "models")
+MODEL_ROOTS = model_roots()
+
+# 源码运行时，把「权重就在我旁边」这件事记下来：之后用 uv tool / pip 装成 wheel，
+# ROOT 会变成 site-packages，靠这条记录才找得回源码旁的旧权重。
+if _has_content(ROOT / "models"):
+    remember_model_root(ROOT / "models")
 
 for directory in (DATA_DIR, ARTIFACT_DIR, VOICE_DIR, LOG_DIR):
     directory.mkdir(parents=True, exist_ok=True)
@@ -192,6 +275,9 @@ CHAT_DEFAULTS = {
     "llm_model": "",
     "llm_temperature": 0.7,
     "llm_max_tokens": 320,
+    # 默认直连。系统开着代理时，httpx 会把 API 请求也塞进去导致连接被重置。
+    "llm_use_proxy": False,
+    "llm_proxy_url": "",
     "system_prompt": DEFAULT_SYSTEM_PROMPT,
     "voice_id": "preset:Vivian",
     "asr_model": DEFAULT_ASR_MODEL,

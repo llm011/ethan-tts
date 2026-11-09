@@ -26,6 +26,7 @@ from config import (
     DEFAULT_MODEL,
     HOME_DIR,
     MODEL_DIR,
+    MODEL_ROOTS,
     MODELS,
     ROOT,
 )
@@ -72,18 +73,37 @@ def _writable(path: Path) -> tuple[bool, str]:
     return os.access(probe, os.W_OK), f"{probe} {'可写' if os.access(probe, os.W_OK) else '不可写'}"
 
 
-def _installed_models() -> list[str]:
-    """判断模型是否已下载。
+def _model_location(model_key: str) -> Path | None:
+    """这个模型实际在哪（在任一候选根目录里找到就返回），没有则 None。
 
     刻意**不 import engine**：engine 在模块顶层 import mlx，而 doctor 存在的意义
     恰恰是「依赖坏了的时候」——一 import 就抛，自检等于没得跑。
-    判断标准与 engine.model_installed 保持一致：目录里有 *.safetensors。
+    判断标准与 engine.model_path 保持一致：目录里有 *.safetensors。
+
+    必须遍历 MODEL_ROOTS 而不是只看 MODEL_DIR：从旧版（clone 安装）升级上来的
+    用户，权重还在源码旁，只看用户目录会全部报「未下载」，安装流程会白下一份。
     """
-    return [
-        key for key, meta in MODELS.items()
-        if (MODEL_DIR / meta["directory"]).is_dir()
-        and any((MODEL_DIR / meta["directory"]).glob("*.safetensors"))
-    ]
+    name = MODELS[model_key]["directory"]
+    for root in MODEL_ROOTS:
+        candidate = root / name
+        if any(candidate.glob("*.safetensors")):
+            return candidate
+    return None
+
+
+def _has_legacy_models() -> bool:
+    """源码目录里是不是还留着老版本下的权重（升级用户常见）。"""
+    legacy = ROOT / "models"
+    if legacy in MODEL_ROOTS and not legacy.is_dir():
+        return False
+    try:
+        return any(legacy.iterdir())
+    except OSError:
+        return False
+
+
+def _installed_models() -> list[str]:
+    return [key for key in MODELS if _model_location(key) is not None]
 
 
 # ------------------------------------------------------------------ setup
@@ -184,6 +204,8 @@ def cmd_setup(args) -> int:
             print(f"默认模型还没下载：{MODELS[DEFAULT_MODEL]['name']}")
             print(f"  · 体积约 {DEFAULT_SIZE_GB:g} GB")
             print(f"  · 位置 {MODEL_DIR}")
+            if _has_legacy_models():
+                print(f"  · 检测到源码目录里已有权重：{ROOT / 'models'}（会被自动复用，不必重下）")
             print("  · 从 Hugging Face 下载（本机代理、hf-mirror、直连会依次尝试）")
         want = _ask(
             "现在下载吗？",
@@ -266,7 +288,8 @@ def cmd_doctor(args) -> int:
     # 模型
     installed = _installed_models()
     if DEFAULT_MODEL in installed:
-        add("默认模型", "ok", f"{MODELS[DEFAULT_MODEL]['name']} 已就绪（{MODEL_DIR}）")
+        where = _model_location(DEFAULT_MODEL)
+        add("默认模型", "ok", f"{MODELS[DEFAULT_MODEL]['name']} 已就绪（{where}）")
     else:
         add("默认模型", "warn", "未下载",
             f"ethan-tts models download {DEFAULT_MODEL}（约 {DEFAULT_SIZE_GB:g} GB）")

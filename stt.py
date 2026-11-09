@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import db
-from config import ASR_MODELS, MODEL_DIR, STT_SAMPLE_RATE
+from config import ASR_MODELS, MODEL_ROOTS, MODEL_DIR, STT_SAMPLE_RATE
 
 # A browser may send a leading/silent-only turn; transcribing it would make the
 # LLM answer a non-question, so turns below this length are refused.
@@ -28,9 +28,16 @@ MIN_TURN_SECONDS = .35
 
 
 def asr_model_path(model_key: str) -> Path:
+    """Same root search as the TTS models: an upgrade may leave the weights in
+    either the user directory or the source checkout."""
     if model_key not in ASR_MODELS:
         raise ValueError("不支持的语音识别模型")
-    return MODEL_DIR / ASR_MODELS[model_key]["directory"]
+    name = ASR_MODELS[model_key]["directory"]
+    for root in MODEL_ROOTS:
+        candidate = root / name
+        if any(candidate.glob("*.safetensors")):
+            return candidate
+    return MODEL_ROOTS[0] / name
 
 
 # A weights-only checkout is not usable: every backend here also needs its
