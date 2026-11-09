@@ -16,7 +16,7 @@ import mlx.core as mx
 import numpy as np
 
 import db
-from config import ARTIFACT_DIR, DEFAULT_MODEL, MODEL_DIR, MODELS, SAMPLE_RATE, VOICE_DIR
+from config import ARTIFACT_DIR, DEFAULT_MODEL, MODEL_DIR, MODEL_ROOTS, MODELS, SAMPLE_RATE, VOICE_DIR
 
 _SPLIT_RE = re.compile(r"(?<=[。！？；!?;\n])")
 _CANCEL_CHECK = re.compile(r"[^a-zA-Z0-9_-]")
@@ -209,9 +209,19 @@ def change_speed(samples: np.ndarray, speed: float) -> np.ndarray:
 
 
 def model_path(model_key: str) -> Path:
+    """权重目录：在候选根目录里找这个模型，谁先有就用谁。
+
+    升级后用户目录和源码目录可能各有一半模型（新版本重下了一部分），
+    只认一个根目录会让另一半显示成「未下载」。
+    """
     if model_key not in MODELS:
         raise ValueError("不支持的模型")
-    return MODEL_DIR / MODELS[model_key]["directory"]
+    name = MODELS[model_key]["directory"]
+    for root in MODEL_ROOTS:
+        candidate = root / name
+        if any(candidate.glob("*.safetensors")):
+            return candidate
+    return MODEL_ROOTS[0] / name
 
 
 def model_installed(model_key: str) -> bool:
@@ -556,7 +566,7 @@ def speak_stream(params: SynthesisParams, sentence: str, cancelled=None) -> Iter
             return
         try:
             chunk = chunks.get(timeout=.2)
-        except queue.Empty:
+        except Empty:
             continue
         if chunk is None:
             break

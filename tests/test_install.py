@@ -157,3 +157,58 @@ def test_doctor_does_not_import_engine():
     """
     source = (ROOT / "setup_cmd.py").read_text(encoding="utf-8")
     assert "from engine import" not in source, "setup_cmd 不能 import engine（会拖进 mlx）"
+
+
+def test_model_roots_covers_legacy_source_dir(tmp_path, monkeypatch):
+    """升级用户：权重还在源码旁的 models/ 里，必须也能被找到。
+
+    真实踩过：新版第一次启动创建了空的用户目录，之后「用户目录存在」就优先用它，
+    源码旁已经下好的 4 GB 权重全显示成「未下载」，安装流程又白下一份。
+    """
+    import importlib
+
+    import config
+
+    monkeypatch.delenv("ETHAN_TTS_MODEL_DIR", raising=False)
+    monkeypatch.setenv("ETHAN_TTS_DIR", str(tmp_path / "home"))
+    reloaded = importlib.reload(config)
+    try:
+        roots = reloaded.MODEL_ROOTS
+        assert len(roots) >= 1
+        assert config.ROOT / "models" in roots, "源码目录必须留在候选里，否则老权重找不到"
+    finally:
+        monkeypatch.delenv("ETHAN_TTS_DIR")
+        importlib.reload(config)
+
+
+def test_has_content_ignores_empty_dir(tmp_path):
+    """「建了但空」的目录不能被当成「用户已经用这个位置了」。"""
+    import config
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert config._has_content(empty) is False
+
+    filled = tmp_path / "filled"
+    filled.mkdir()
+    (filled / "x.txt").write_text("y")
+    assert config._has_content(filled) is True
+
+
+def test_setup_cmd_finds_model_in_any_root(monkeypatch, tmp_path):
+    """doctor 的模型检测也要遍历所有根目录，不能只看 MODEL_DIR。
+
+    否则从 clone 安装升级到 uv tool 安装的用户，doctor 会一直报「未下载」，
+    而他其实什么都装好了。
+    """
+    import setup_cmd
+
+    fake_root = tmp_path / "legacy"
+    name = setup_cmd.MODELS[setup_cmd.DEFAULT_MODEL]["directory"]
+    target = fake_root / name
+    target.mkdir(parents=True)
+    (target / "model.safetensors").write_bytes(b"x")
+
+    monkeypatch.setattr(setup_cmd, "MODEL_ROOTS", [tmp_path / "empty-home", fake_root])
+    assert setup_cmd._model_location(setup_cmd.DEFAULT_MODEL) == target
+    assert setup_cmd.DEFAULT_MODEL in setup_cmd._installed_models()
