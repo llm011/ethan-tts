@@ -35,7 +35,16 @@ ethan-tts = "cli:main"
 py-modules = [
   "app", "cli", "config", "db", "engine", "download_model",
   "stt", "llm", "chat", "setup_cmd", "server_cmd", "single_instance",
+  # 从 app.py 拆出来的模块（路由、请求模型、共享依赖）
+  "deps", "model_registry", "schemas", "settings_store", "web_assets",
+  "cli_client", "cli_helpers",
 ]
+
+[tool.setuptools.packages.find]
+include = ["routes*", "commands*"]
+
+[tool.setuptools.package-data]
+routes = ["*.py"]
 
 # 网页界面必须打进 wheel，否则装完打开 8765 是空白页。
 # setuptools 对 py-modules 不会自动收顶层目录下的非 .py 文件，只能显式列。

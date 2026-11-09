@@ -9,6 +9,9 @@ from pathlib import Path
 import pytest
 
 import cli
+import cli_client
+import cli_helpers
+import commands
 
 
 def fake_request_factory(responses):
@@ -30,10 +33,11 @@ def test_resolve_voice_by_id_name_and_partial(monkeypatch):
         {"id": "voice:abc", "name": "老凌的声音"},
     ]}
     fake, _ = fake_request_factory({"/api/voices": voices})
-    monkeypatch.setattr(cli, "request", fake)
-    assert cli.resolve_voice("voice:abc", "http://x") == "voice:abc"
-    assert cli.resolve_voice("薇薇安", "http://x") == "preset:Vivian"
-    assert cli.resolve_voice("老凌", "http://x") == "voice:abc"
+    monkeypatch.setattr(cli_helpers, "request", fake)
+    monkeypatch.setattr(commands, "request", fake)
+    assert cli_helpers.resolve_voice("voice:abc", "http://x") == "voice:abc"
+    assert cli_helpers.resolve_voice("薇薇安", "http://x") == "preset:Vivian"
+    assert cli_helpers.resolve_voice("老凌", "http://x") == "voice:abc"
     with pytest.raises(cli.ApiError):
         cli.resolve_voice("不存在", "http://x")
 
@@ -46,8 +50,9 @@ def test_resolve_voice_uses_default_setting(monkeypatch):
         ]},
         "/api/settings": {"default_voice_id": "preset:Serena"},
     })
-    monkeypatch.setattr(cli, "request", fake)
-    assert cli.resolve_voice(None, "http://x") == "preset:Serena"
+    monkeypatch.setattr(cli_helpers, "request", fake)
+    monkeypatch.setattr(commands, "request", fake)
+    assert cli_helpers.resolve_voice(None, "http://x") == "preset:Serena"
 
 
 def test_say_writes_wav_and_reports_headers(monkeypatch, tmp_path):
@@ -58,8 +63,9 @@ def test_say_writes_wav_and_reports_headers(monkeypatch, tmp_path):
             "x-gen-seconds": "0.8", "x-rtf": "0.53",
         }),
     })
-    monkeypatch.setattr(cli, "request", fake)
-    monkeypatch.setattr(cli, "ensure_server", lambda base, autostart: None)
+    monkeypatch.setattr(cli_helpers, "request", fake)
+    monkeypatch.setattr(commands, "request", fake)
+    monkeypatch.setattr(commands, "ensure_server", lambda base, autostart: None)
     target = tmp_path / "out.wav"
     args = argparse.Namespace(
         base="http://x", json=True, autostart=True, text="你好", file=None,
@@ -78,21 +84,21 @@ def test_say_reads_text_file(monkeypatch, tmp_path):
     source.write_text("  从文件读取的文本。  ", encoding="utf-8")
     args = argparse.Namespace(file=str(source), text=None)
     monkeypatch.setattr(cli.sys, "stdin", argparse.Namespace(isatty=lambda: True))
-    assert cli.read_text(args) == "从文件读取的文本。"
+    assert cli_helpers.read_text(args) == "从文件读取的文本。"
 
 
 def test_say_rejects_empty_text(monkeypatch):
     args = argparse.Namespace(file=None, text="   ")
     monkeypatch.setattr(cli.sys, "stdin", argparse.Namespace(isatty=lambda: True))
-    with pytest.raises(cli.ApiError):
-        cli.read_text(args)
+    with pytest.raises(cli_helpers.ApiError):
+        cli_helpers.read_text(args)
 
 
 def test_stream_wav_patches_placeholder_sizes(tmp_path):
     target = tmp_path / "stream.wav"
     payload = b"RIFF" + (0xFFFFFFFF).to_bytes(4, "little") + b"\0" * 32 + \
         (0xFFFFFFFF).to_bytes(4, "little") + b"\0" * 20
-    cli.write_stream_wav(payload, target)
+    cli_helpers.write_stream_wav(payload, target)
     data = target.read_bytes()
     assert int.from_bytes(data[4:8], "little") == len(data) - 8
     assert int.from_bytes(data[40:44], "little") == len(data) - 44
@@ -127,7 +133,7 @@ def test_startup_guard_serializes_concurrent_spawn(tmp_path, monkeypatch):
     spawns = []
     lock = threading.Lock()
 
-    monkeypatch.setattr(cli, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(cli_client, "DATA_DIR", tmp_path)
     ready = {"at": None}
 
     def slow_is_up(base):
@@ -143,12 +149,12 @@ def test_startup_guard_serializes_concurrent_spawn(tmp_path, monkeypatch):
         ready["at"] = time.monotonic() + .3
         time.sleep(.3)
 
-    monkeypatch.setattr(cli, "is_up", slow_is_up)
-    monkeypatch.setattr(cli, "_spawn_server", fake_spawn)
-    monkeypatch.setattr(cli, "_wait_until_up", fake_wait)
+    monkeypatch.setattr(cli_client, "is_up", slow_is_up)
+    monkeypatch.setattr(cli_client, "_spawn_server", fake_spawn)
+    monkeypatch.setattr(cli_client, "_wait_until_up", fake_wait)
 
     threads = [
-        threading.Thread(target=cli.ensure_server, args=("http://127.0.0.1:8765", True))
+        threading.Thread(target=cli_client.ensure_server, args=("http://127.0.0.1:8765", True))
         for _ in range(5)
     ]
     for t in threads:
