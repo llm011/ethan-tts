@@ -703,8 +703,17 @@ function closeRail() { $("rail").classList.remove("open"); $("rail-mask").hidden
 /* 前进/后退：地址变了就切到对应会话，不重新加载页面。 */
 window.addEventListener("popstate", () => {
   const target = sessionIdFromUrl();
-  if (target && target !== state.sessionId) openSession(target);
-  else if (!target && state.sessionId) newSession();
+  if (target === state.sessionId) return;
+  if (state.busy) {
+    // 正在对话时 openSession/newSession 会被挡住，地址却已经变了，
+    // 会出现「地址是一个会话、内容是另一个」。这里把地址退回去，
+    // 而不是让两者不一致。
+    toast("等这一轮说完再切换对话", true);
+    syncUrl(state.sessionId);
+    return;
+  }
+  if (target) openSession(target);
+  else newSession();
 });
 
 async function bootstrap() {
