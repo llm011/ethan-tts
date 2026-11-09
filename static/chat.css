@@ -371,3 +371,10 @@ body.busy .rail-item, body.busy .new-chat, body.busy .mic { cursor: progress; }
   .voice-sheet{position:fixed;left:10px;right:10px;top:auto;bottom:12px;
     width:auto;max-height:70vh;border-radius:16px}
 }
+
+/* 触屏设备没有 hover 状态，删除键若仍靠 hover 显示，手机上就点不到。
+   这里让它常驻可见（弱化显示），并在关闭抽屉时保持原样。 */
+@media (hover: none) {
+  .rail-del { opacity: .55; }
+  .rail-row:hover .rail-del { opacity: .8; }
+}
