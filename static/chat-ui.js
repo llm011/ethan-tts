@@ -229,11 +229,25 @@ function sessionIdFromUrl() {
   }
 }
 
+/* 老链接 /chat/chat:xxxx 在 id 统一去前缀后已经查不到。
+   这里做一次映射：带着旧前缀或 %3A 编码的，去掉前缀再试。 */
+function normalizeSessionId(id) {
+  if (!id) return id;
+  return id.startsWith("chat:") ? id.slice(5) : id;
+}
+
 async function openSession(sessionId, options = {}) {
   if (state.busy) return toast("等这一轮说完再切换对话", true);
   stopAllPlayback();
   try {
-    const data = await api(`/api/chat/sessions/${sessionId}`);
+    let data;
+    try {
+      data = await api(`/api/chat/sessions/${sessionId}`);
+    } catch (err) {
+      const fallback = normalizeSessionId(sessionId);
+      if (fallback === sessionId) throw err;
+      data = await api(`/api/chat/sessions/${fallback}`);
+    }
     state.sessionId = data.id;
     syncUrl(data.id, options.push === true);
     state.messages = data.messages || [];
