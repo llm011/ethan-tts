@@ -657,6 +657,9 @@ function checkSetup() {
   if (!configured) {
     showSetupNotice("还没有配置对话模型", "语音对话需要一个模型来回答。先去设置页填好模型地址和 API Key，回来就能直接说话。",
       "/#settings/model", "去模型设置 →");
+  } else if (state.configWarning) {
+    // 配置看起来是占位值：直接说清楚，别等用户去翻日志里的 nodename 报错。
+    showSetupNotice("模型地址可能填错了", state.configWarning, "/#settings/model", "去修改 →");
   } else {
     $("setup-notice").hidden = true;
     const asr = state.models.asr.find(model => model.key === settings.asr_model);
@@ -682,6 +685,7 @@ async function bootstrap() {
   buildBars();
   const data = await api("/api/chat/bootstrap");
   state.settings = data.settings;
+  state.configWarning = data.config_warning || "";
   state.models = data.models;
   state.sessions = data.sessions || [];
   state.audioRate = data.audio_rate || AUDIO_RATE;

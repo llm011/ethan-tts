@@ -942,6 +942,25 @@ class ModelTestRequest(BaseModel):
     model: str = ""
 
 
+# 开发自测时常把地址写成这些，一旦残留在用户库里，报错会变成
+# 「无法连接模型服务：nodename nor servname」，很难联想到是配置问题。
+_FAKE_HOSTS = ("fake", "example.com", "localhost:1", "test")
+
+
+def config_warning(base_url: str) -> str:
+    """给前端一句人话，解释这个地址为什么不可用。"""
+    url = (base_url or "").strip().lower()
+    if not url:
+        return ""
+    try:
+        host = url.split("://", 1)[-1].split("/", 1)[0]
+    except IndexError:
+        return ""
+    if any(marker in host for marker in _FAKE_HOSTS):
+        return f"模型地址看起来是测试用的占位值（{host}），请在设置页改成真实的服务地址"
+    return ""
+
+
 def public_model_status() -> dict:
     return {"tts": [item for item in model_status() if item["role"] == "tts"],
             "asr": [item for item in model_status() if item["role"] == "asr"]}
@@ -952,8 +971,10 @@ def chat_bootstrap() -> dict:
     """Everything the chat page needs on first paint, in one round trip."""
     settings = db.get_chat_settings()
     system_prompt = settings.pop("system_prompt")
+    warning = config_warning(settings.get("llm_base_url", ""))
     return {
         "settings": settings,
+        "config_warning": warning,
         "models": public_model_status(),
         "voices": [dict(row) for row in _voice_rows()],
         "presets": CHAT_MODEL_PRESETS,
