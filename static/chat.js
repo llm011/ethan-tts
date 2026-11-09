@@ -389,12 +389,27 @@ function renderSessions() {
     : `<div class="rail-empty">还没有对话，按一下麦克风开始吧</div>`;
 }
 
-async function openSession(sessionId) {
+/* 把当前会话写进地址栏：/chat/<id>。
+   以前所有会话共用 /chat，刷新永远回到第一个对话，也没法分享某一段。 */
+function syncUrl(sessionId, push = false) {
+  const target = sessionId ? `/chat/${encodeURIComponent(sessionId)}` : "/chat";
+  if (location.pathname === target) return;
+  if (push) history.pushState({ sessionId }, "", target);
+  else history.replaceState({ sessionId }, "", target);
+}
+
+function sessionIdFromUrl() {
+  const match = location.pathname.match(/^\/chat\/([^/]+)\/?$/);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+async function openSession(sessionId, options = {}) {
   if (state.busy) return toast("等这一轮说完再切换对话", true);
   player.stop();
   try {
     const data = await api(`/api/chat/sessions/${sessionId}`);
     state.sessionId = data.id;
+    syncUrl(data.id, options.push === true);
     state.messages = data.messages || [];
     $("session-title").textContent = data.title;
     renderThread();
@@ -410,6 +425,7 @@ function newSession() {
   player.stop();
   state.sessionId = null;
   state.messages = [];
+  syncUrl(null, true);
   $("session-title").textContent = "新的对话";
   renderThread();
   renderSessions();
@@ -479,7 +495,10 @@ const handlers = {
     state.liveEl = null;
     state.liveAssistant = "";
     state.messages.push(message);
-    if (!state.sessionId) { state.sessionId = message.session_id; }
+    if (!state.sessionId) {
+      state.sessionId = message.session_id;
+      syncUrl(state.sessionId, true);
+    }
     renderThread();
   },
   sentence(data) {
@@ -681,6 +700,13 @@ function updateModelChip() {
 function openRail() { $("rail").classList.add("open"); $("rail-mask").hidden = false; }
 function closeRail() { $("rail").classList.remove("open"); $("rail-mask").hidden = true; }
 
+/* 前进/后退：地址变了就切到对应会话，不重新加载页面。 */
+window.addEventListener("popstate", () => {
+  const target = sessionIdFromUrl();
+  if (target && target !== state.sessionId) openSession(target);
+  else if (!target && state.sessionId) newSession();
+});
+
 async function bootstrap() {
   buildBars();
   const data = await api("/api/chat/bootstrap");
@@ -699,7 +725,16 @@ async function bootstrap() {
     // 后台预热，失败也无所谓；成功了第一次回复就不用等模型加载。
     fetch("/api/chat/warmup", { method: "POST" }).catch(() => {});
   }
-  if (state.sessions.length) await openSession(state.sessions[0].id);
+  const fromUrl = sessionIdFromUrl();
+  if (fromUrl) {
+    await openSession(fromUrl);
+    // 地址里的会话已被删除时，退回到最近一条，而不是停在空页。
+    if (state.sessionId !== fromUrl && state.sessions.length) {
+      await openSession(state.sessions[0].id);
+    }
+  } else if (state.sessions.length) {
+    await openSession(state.sessions[0].id);
+  }
 }
 
 function bindUi() {
