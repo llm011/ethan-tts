@@ -247,3 +247,12 @@ a.button, a.nav-item, .mobile-nav a, .preset-chip, .text-button { cursor: pointe
 }
 @keyframes dlShimmer{from{background-position:100% 0}to{background-position:-100% 0}}
 @media(prefers-reduced-motion:reduce){.dl-bar i{animation:none}}
+
+/* GitHub 仓库入口：常驻右上角，图标风格与 runtime 文字保持一致 */
+.gh-link{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:26px;height:26px;border-radius:7px;color:var(--muted);
+  transition:color .15s,background .15s;
+}
+.gh-link:hover{color:var(--text);background:var(--panel-soft)}
+.gh-link svg{display:block}

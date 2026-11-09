@@ -1,5 +1,9 @@
 # ethan-tts
 
+[![GitHub](https://img.shields.io/badge/GitHub-llm011%2Fethan--tts-181717?logo=github)](https://github.com/llm011/ethan-tts)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Apple%20Silicon-required-black?logo=apple)](https://support.apple.com)
+
 在自己的 Mac 上运行 **Qwen3-TTS** 的轻量语音工作台。灵感来自这篇[笔记](https://www.biji.com/note/share_note/AgMplzvne3OA2)，但部署方式针对 **Apple Silicon** 重新设计：不用 NVIDIA 显卡、不用 Docker，默认使用 **MLX 0.6B 4bit** 权重，以较低内存获得秒级合成。
 
 **本仓库不包含模型权重。** 下载脚本会从 Hugging Face / hf-mirror 获取权重，模型、音频、参考录音、日志和数据库均已加入 `.gitignore`。
@@ -141,6 +145,30 @@ Qwen3-TTS 本身**没有原生语速参数**（其 `speed` 形参在源码中标
 ### 分句拼接与静音
 
 Qwen3-TTS 每段独立生成时，首尾各带约 **300 ms** 静音。早期版本直接拼接，导致长文中间出现 **0.6–0.9 秒**的不自然空白（用户实测 71 秒音频中可听到多处）。现在每段只裁掉首尾边缘静音，再按标点补回停顿（逗号 0.10 秒、分号 0.20 秒、句号 0.26 秒），**句中自然停顿完全不削**。
+
+## 三步上手
+
+```bash
+# 1. 装（独立命令行工具，不动系统 Python）
+uv tool install --python 3.12 "git+https://github.com/llm011/ethan-tts.git"
+
+# 2. 自检 + 下载默认模型
+ethan-tts setup
+
+# 3. 打开界面
+open http://127.0.0.1:8765        # 工作台
+open http://127.0.0.1:8765/chat   # 语音对话
+```
+
+想 24 小时随时打开，再补一条 `ethan-tts server install`（开机自启 + 崩溃自愈）。之后哪里不对劲，`ethan-tts doctor` 会逐项体检并给出修复命令。
+
+| 我想…… | 去这里 |
+| --- | --- |
+| 把一段文字变成语音 | 工作台「语音合成」 |
+| 和模型语音对话 | `/chat`（需先在设置里配模型） |
+| 换一个说话的声音 | 「音色库」，或录音克隆自己的声音 |
+| 让模型把某个词读对 | 「设置 → 读音纠正」，如 `Qwen` → 千问 |
+| 用命令或脚本调用 | 见「命令行」一节，所有命令支持 `--json` |
 
 ## 快速开始
 
@@ -380,6 +408,26 @@ curl http://127.0.0.1:8765/api/artifacts
 curl http://127.0.0.1:8765/api/logs
 curl http://127.0.0.1:8765/health
 ```
+
+## 常见问题
+
+**模型显示「未下载」，但我明明下过**
+权重可能还在旧的 clone 目录里。程序会按 `用户目录 → 历史记录的目录 → 当前代码目录` 依次查找，记录写在 `~/Library/Application Support/ethan-tts/model-roots.json`。`ethan-tts doctor` 会显示它实际在找哪些路径。若权重在别的地方，用 `ETHAN_TTS_MODEL_DIR=/path/to/models` 指过去即可。
+
+**语音对话说完话没声音 / 等很久**
+先看 `http://127.0.0.1:8765/api/logs?level=ERROR`。首次对话要加载 TTS 模型（约 10 秒），页面打开时会自动预热，通常第二次就快了（热态首句约 1 秒）。若日志里有 `Connection reset by peer`，是代理问题——见下一条。
+
+**调用模型报 500 / 连接被重置**
+系统开着全局代理时，请求会被塞进代理导致重置。模型请求默认**直连**；如果确实需要代理，在「设置 → 模型设置」填代理地址（填了即生效），或打开「走系统代理」跟随系统设置。
+
+**下载按钮点不动 / 一直是「下载中…」**
+下载状态由服务端维护，可在 `http://127.0.0.1:8765/api/models/downloads` 查看进度。同一时间只下载一个模型，重复点击会提示「正在下载中」。
+
+**iPhone/手机打不开**
+服务默认只监听本机。用 `ethan-tts serve --host 0.0.0.0` 启动，然后在「设置 → 模型与资源 → 手机访问」查看局域网地址。手机浏览器打开 `/chat` 后可「添加到主屏幕」。
+
+**改了前端代码看不到效果**
+页面引用的静态资源带内容指纹（`?v=哈希`），正常刷新即可；若页面本身是旧的，`Cmd+Shift+R` 一次即可。
 
 ## 本地数据与隐私
 
