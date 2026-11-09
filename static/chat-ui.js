@@ -134,7 +134,7 @@ function renderThread() {
    之前只调用 player.stop()，正在生成的「重新朗读」不受影响，
    切到别的对话后会突然出声，图标也停在朗读状态。 */
 function stopAllPlayback() {
-  window.speakAbort?.abort();
+  shared.speakAbort?.abort();
   player.stop();
   setOrb("idle");
   syncOrbCursor();

@@ -24,6 +24,11 @@ const state = {
   speaking: false,
 };
 
+/* 跨文件中转站：chat-turn.js 记录正在进行的朗读请求，
+   chat-ui.js 在切换对话时中止它。放这里是因为 core 最先加载，
+   两边的函数执行时它一定已经就绪。 */
+const shared = { speakAbort: null };
+
 const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmtTime = iso => {
   const d = new Date(iso);

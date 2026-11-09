@@ -389,13 +389,13 @@ function bindUi() {
    以前这条路径自己建 AudioBufferSource，绕开了 player 的统一管理：
    切到别的对话后它还在播，按钮也停在「朗读中…」。现在统一走 player，
    并用 AbortController + 播放代数双重保证切走即停。 */
-let speakAbort = null;
+/* 共享给 chat-ui.js（定义在 chat-core.js）：切换对话时中止朗读请求。 */
 async function speakMessage(message, button) {
   player.stop();
   const token = player.generation;
-  speakAbort?.abort();
+  shared.speakAbort?.abort();
   const controller = new AbortController();
-  speakAbort = controller;
+  shared.speakAbort = controller;
   const original = button.textContent;
   button.textContent = "正在生成…";
   button.disabled = true;
@@ -422,11 +422,11 @@ async function speakMessage(message, button) {
     if (err.name !== "AbortError") toast(err.message, true);
   } finally {
     // 只有这条消息的按钮还在文档里才复原，切走后按钮已经不存在了
-    if (button.isConnected && speakAbort === controller) {
+    if (button.isConnected && shared.speakAbort === controller) {
       button.textContent = original;
       button.disabled = false;
     }
-    if (speakAbort === controller) speakAbort = null;
+    if (shared.speakAbort === controller) shared.speakAbort = null;
   }
 }
 
