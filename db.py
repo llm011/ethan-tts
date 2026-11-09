@@ -369,6 +369,24 @@ def _chat_columns(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, created_at);
         """
     )
+    # 早期会话 id 带 "chat:" 前缀，地址栏里既难读又要转义。统一去掉，
+    # 会话和它的消息一起改；目标 id 已被占用时保持原样，避免撞主键。
+    # _chat_columns 每个 chat 请求都会调用，所以只跑一次（用一个标记记住）。
+    legacy = (conn.execute("SELECT id FROM chat_sessions WHERE id LIKE 'chat:%'").fetchall()
+              if not conn.execute(
+                  "SELECT 1 FROM settings WHERE key='migration:session_ids'").fetchone()
+              else [])
+    for row in legacy:
+        old = row["id"]
+        new = old.split(":", 1)[1]
+        if conn.execute("SELECT 1 FROM chat_sessions WHERE id=?", (new,)).fetchone():
+            continue
+        conn.execute("UPDATE chat_sessions SET id=? WHERE id=?", (new, old))
+        conn.execute("UPDATE chat_messages SET session_id=? WHERE session_id=?", (new, old))
+    if legacy:
+        # 只有「确实迁移过旧 id」才落标记；否则空库第一次建表就会打上标记，
+        # 之后真正的旧数据永远迁移不到。
+        conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('migration:session_ids','1')")
 
 
 def create_chat_session(title: str = "新的对话") -> dict[str, Any]:
