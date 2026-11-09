@@ -203,7 +203,7 @@ function renderSessions() {
           <span class="rail-title">${esc(session.title)}</span>
           <span class="rail-preview">${esc((session.preview || "空白对话").slice(0, 30))}${session.message_count ? ` · ${session.message_count}` : ""}</span>
         </button>
-        <button class="rail-del" data-del-session="${esc(session.id)}" title="删除对话" aria-label="删除对话">×</button>
+        <button class="rail-del" data-del-session="${esc(session.id)}" title="删除对话" aria-label="删除对话"><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 4h11M6.5 4V2.8h3V4M4 4l.6 9a1 1 0 0 0 1 .9h4.8a1 1 0 0 0 1-.9L12 4"/><path d="M6.6 6.8v4.4M9.4 6.8v4.4"/></svg></button>
       </div>`).join("")
     : `<div class="rail-empty">还没有对话，按一下麦克风开始吧</div>`;
 }
