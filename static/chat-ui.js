@@ -1,3 +1,70 @@
+
+/* ---------------------------------------------------------- voice picker */
+/* 朗读音色以前只能去设置页改，聊到一半想换个声音很别扭。
+   这里直接放一个切换器：选中即写回设置，从下一轮起生效。 */
+const LANG_NAMES = { Chinese: "中文", English: "英语", Japanese: "日语", Korean: "韩语" };
+
+function voiceLabel(voice) {
+  const parts = [LANG_NAMES[voice.language] || voice.language || ""];
+  const gender = (voice.description || "").match(/^(男声|女声)/)?.[1];
+  if (gender) parts.push(gender);
+  if (voice.dialect) parts.push("方言");
+  return parts.filter(Boolean).join(" · ");
+}
+
+function currentVoice() {
+  return (state.voices || []).find(v => v.id === state.settings?.voice_id);
+}
+
+function renderVoiceChip() {
+  const voice = currentVoice();
+  $("voice-name").textContent = voice ? voice.name : "音色";
+  $("voice-chip").classList.toggle("warn", !voice);
+}
+
+function renderVoiceList() {
+  const chosen = state.settings?.voice_id;
+  $("voice-list").innerHTML = (state.voices || []).map(voice => `
+    <button class="voice-option${voice.id === chosen ? " active" : ""}" role="option"
+            aria-selected="${voice.id === chosen}" data-voice-id="${esc(voice.id)}">
+      <span class="vo-main">
+        <span class="vo-name">${esc(voice.name)}</span>
+        <span class="vo-traits">${esc(voiceLabel(voice))}</span>
+      </span>
+      <span class="vo-desc">${esc(voice.description || "")}</span>
+      ${voice.usage_hint ? `<span class="vo-usage">适合 ${esc(voice.usage_hint)}</span>` : ""}
+      ${voice.id === chosen ? '<span class="vo-check">✓</span>' : ""}
+    </button>`).join("") || '<div class="vo-empty">还没有可用的音色</div>';
+}
+
+function openVoiceSheet() {
+  if (!(state.voices || []).length) return toast("还没有可用音色", true);
+  renderVoiceList();
+  $("voice-sheet").hidden = false;
+  $("voice-sheet-mask").hidden = false;
+  $("voice-sheet").querySelector(".voice-option.active")?.scrollIntoView({ block: "nearest" });
+}
+
+function closeVoiceSheet() {
+  $("voice-sheet").hidden = true;
+  $("voice-sheet-mask").hidden = true;
+}
+
+async function chooseVoice(voiceId) {
+  if (voiceId === state.settings?.voice_id) return closeVoiceSheet();
+  try {
+    state.settings = await api("/api/chat/settings", {
+      method: "PATCH", body: JSON.stringify({ voice_id: voiceId }),
+    });
+    renderVoiceChip();
+    renderVoiceList();
+    closeVoiceSheet();
+    // 音色在每轮开始时读取一次，朗读中途切换要到下一轮才生效。
+    const name = currentVoice()?.name || voiceId;
+    toast(state.busy ? `已切换为「${name}」，这轮说完后生效` : `已切换为「${name}」`);
+  } catch (err) { toast(err.message, true); }
+}
+
 /* ------------------------------------------------------------------ orb */
 let levelRaf = null;
 let baseLevel = 0;
@@ -57,8 +124,16 @@ function idleOrb() {
 /* ----------------------------------------------------------------- thread */
 function renderThread() {
   $("thread").innerHTML = state.messages.map(message => messageHtml(message)).join("");
-  $("hero").classList.toggle("small", state.messages.length > 0);
+  syncHeroMode();
   scrollThread();
+}
+
+/* 没有消息时圆形图标居中占满舞台；有消息后缩成顶部标记，
+   把剩余高度全部让给消息区（两者都 flex:1 时会把高度对半分）。 */
+function syncHeroMode() {
+  const empty = state.messages.length === 0 && !$("thread").children.length;
+  $("hero").classList.toggle("idle-mode", empty);
+  $("hero").classList.toggle("small", !empty);
 }
 
 function messageHtml(message) {
@@ -83,7 +158,7 @@ function appendLive(role, text = "") {
   el.innerHTML = `<div class="avatar">${role === "user" ? "我" : "e"}</div>
     <div class="bubble">${esc(text)}<span class="caret"></span></div>`;
   $("thread").append(el);
-  $("hero").classList.add("small");
+  syncHeroMode();
   scrollThread();
   return el;
 }
@@ -119,7 +194,9 @@ function renderSessions() {
 /* 把当前会话写进地址栏：/chat/<id>。
    以前所有会话共用 /chat，刷新永远回到第一个对话，也没法分享某一段。 */
 function syncUrl(sessionId, push = false) {
-  const target = sessionId ? `/chat/${encodeURIComponent(sessionId)}` : "/chat";
+  // 会话 id 形如 chat:595584e74239；冒号在 URL 路径里合法，
+  // 只转义会截断路径的 ? 和 #，地址更可读。
+  const target = sessionId ? `/chat/${sessionId.replace(/[?#]/g, encodeURIComponent)}` : "/chat";
   if (location.pathname === target) return;
   if (push) history.pushState({ sessionId }, "", target);
   else history.replaceState({ sessionId }, "", target);
@@ -127,7 +204,12 @@ function syncUrl(sessionId, push = false) {
 
 function sessionIdFromUrl() {
   const match = location.pathname.match(/^\/chat\/([^/]+)\/?$/);
-  return match ? decodeURIComponent(match[1]) : null;
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]);   // 兼容早期 %3A 的链接
+  } catch (_) {
+    return match[1];
+  }
 }
 
 async function openSession(sessionId, options = {}) {

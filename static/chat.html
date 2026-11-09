@@ -39,6 +39,9 @@
         <span id="stage-sub">本地语音 · 说话即问</span>
       </div>
       <div class="stage-actions">
+        <button class="voice-chip" id="voice-chip" title="切换朗读音色" aria-haspopup="listbox">
+          <span class="voice-dot"></span><span id="voice-name">音色</span><span class="chev">▾</span>
+        </button>
         <span class="model-chip" id="model-chip" title="当前对话模型">未配置模型</span>
         <button class="icon-btn" id="stop-btn" title="停止朗读" hidden>■</button>
       </div>
@@ -58,7 +61,7 @@
     <div class="thread" id="thread" role="log" aria-live="polite"></div>
 
     <!-- Idle: the breathing orb -->
-    <div class="hero" id="hero">
+    <div class="hero idle-mode" id="hero">
       <div class="orb-wrap">
         <div class="orb idle" id="orb">
           <span class="orb-ring"></span><span class="orb-ring r2"></span><span class="orb-ring r3"></span>
@@ -68,6 +71,17 @@
       <h1 id="hero-title">按一下，开始说话</h1>
       <p id="hero-sub">我会听你说完，然后用语音回答你</p>
     </div>
+
+    <!-- Voice picker -->
+    <div class="voice-sheet" id="voice-sheet" hidden>
+      <div class="voice-sheet-head">
+        <strong>朗读音色</strong>
+        <button class="sheet-close" id="voice-sheet-close" aria-label="关闭">×</button>
+      </div>
+      <div class="voice-list" id="voice-list" role="listbox"></div>
+      <div class="voice-sheet-foot">切换后从下一轮对话开始生效</div>
+    </div>
+    <div class="sheet-mask" id="voice-sheet-mask" hidden></div>
 
     <div class="typing" id="typing" hidden><span></span><span></span><span></span><em id="typing-label">正在思考…</em></div>
 

@@ -16,6 +16,7 @@ const state = {
   settings: null,
   audioRate: AUDIO_RATE,
   sessions: [],
+  voices: [],
   sessionId: null,
   messages: [],
   busy: false,
