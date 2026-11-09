@@ -287,11 +287,13 @@ async function bootstrap() {
   state.settings = data.settings;
   state.configWarning = data.config_warning || "";
   state.models = data.models;
+  state.voices = data.voices || [];
   state.sessions = data.sessions || [];
   state.audioRate = data.audio_rate || AUDIO_RATE;
   renderSessions();
   state.messages = [];
   renderThread();
+  renderVoiceChip();
   idleOrb();
   syncOrbCursor();
   checkSetup();
@@ -324,6 +326,16 @@ function bindUi() {
       event.preventDefault();
       sendText();
     }
+  });
+  $("voice-chip").addEventListener("click", openVoiceSheet);
+  $("voice-sheet-close").addEventListener("click", closeVoiceSheet);
+  $("voice-sheet-mask").addEventListener("click", closeVoiceSheet);
+  $("voice-list").addEventListener("click", e => {
+    const option = e.target.closest("[data-voice-id]");
+    if (option) chooseVoice(option.dataset.voiceId);
+  });
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape" && !$("voice-sheet").hidden) closeVoiceSheet();
   });
   $("new-chat").addEventListener("click", newSession);
   $("menu-btn").addEventListener("click", openRail);
