@@ -155,6 +155,9 @@ const player = {
   ctx: null,
   cursor: 0,
   sources: new Set(),
+  // 播放代数：stop() 时 +1。异步拿到的音频回家后先比对代数，
+  // 不一致说明用户已经切走/停掉了，直接丢弃，避免「切换对话还在播」。
+  generation: 0,
   pending: 0,
 
   ensure() {
@@ -189,6 +192,30 @@ const player = {
     };
   },
 
+  /* 整段 PCM 播放（重新朗读用）。token 在发起请求时记录，
+     回来时代数变了就说明这次播放已经作废。 */
+  playWhole(float32, rate, token) {
+    if (token !== this.generation) return false;
+    const ctx = this.ensure();
+    const buffer = ctx.createBuffer(1, float32.length, rate);
+    buffer.copyToChannel(float32, 0);
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(ctx.destination);
+    const startAt = Math.max(this.cursor, ctx.currentTime + 0.04);
+    source.start(startAt);
+    this.cursor = startAt + buffer.duration;
+    this.sources.add(source);
+    this.pending++;
+    setOrb("speaking", "正在朗读…", "");
+    source.onended = () => {
+      this.sources.delete(source);
+      this.pending--;
+      if (!this.pending) this.idleSoon();
+    };
+    return true;
+  },
+
   gap(seconds) { this.cursor += Math.max(0, seconds || 0); },
 
   idleSoon() {
@@ -201,6 +228,7 @@ const player = {
   },
 
   stop() {
+    this.generation += 1;
     for (const source of this.sources) {
       try { source.stop(); } catch (_) { /* already stopped */ }
     }

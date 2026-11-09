@@ -373,7 +373,9 @@ def _chat_columns(conn: sqlite3.Connection) -> None:
 
 def create_chat_session(title: str = "新的对话") -> dict[str, Any]:
     import uuid
-    session_id = f"chat:{uuid.uuid4().hex[:12]}"
+    # 纯 hex id：地址里就是 /chat/7a79620e6ed9，带 "chat:" 前缀既难读
+    # 又要在 URL 里转义。旧会话仍保留前缀，查找逻辑不做前缀假设。
+    session_id = uuid.uuid4().hex[:12]
     stamp = now()
     with _write_lock, connect() as conn:
         _chat_columns(conn)

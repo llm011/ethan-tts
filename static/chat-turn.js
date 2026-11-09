@@ -380,35 +380,54 @@ function bindUi() {
     if (speak) {
       const message = state.messages.find(m => m.id === speak.dataset.speak);
       if (!message) return;
-      player.stop();
-      speak.textContent = "朗读中…";
-      try {
-        const res = await fetch("/api/chat/speak", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: message.content.slice(0, 2000),
-                                 voice_id: state.settings.voice_id }),
-        });
-        if (!res.ok) throw new Error((await res.json()).detail || "朗读失败");
-        const blob = await res.blob();
-        const buffer = await blob.arrayBuffer();
-        const pcm = new Int16Array(buffer, 44, Math.floor((buffer.byteLength - 44) / 2));
-        const floats = new Float32Array(pcm.length);
-        for (let i = 0; i < pcm.length; i++) floats[i] = pcm[i] / 32768;
-        const ctx = player.ensure();
-        const audioBuffer = ctx.createBuffer(1, floats.length, state.audioRate);
-        audioBuffer.copyToChannel(floats, 0);
-        const source = ctx.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(ctx.destination);
-        source.start();
-        player.sources.add(source);
-        player.pending++;
-        setOrb("speaking", "正在朗读…", "");
-        source.onended = () => { player.sources.delete(source); player.pending--; if (!player.pending) player.idleSoon(); };
-      } catch (err) { toast(err.message, true); }
-      finally { speak.textContent = "重新朗读"; }
+      await speakMessage(message, speak);
     }
   });
+}
+
+/* 重新朗读一条消息。
+   以前这条路径自己建 AudioBufferSource，绕开了 player 的统一管理：
+   切到别的对话后它还在播，按钮也停在「朗读中…」。现在统一走 player，
+   并用 AbortController + 播放代数双重保证切走即停。 */
+let speakAbort = null;
+async function speakMessage(message, button) {
+  player.stop();
+  const token = player.generation;
+  speakAbort?.abort();
+  const controller = new AbortController();
+  speakAbort = controller;
+  const original = button.textContent;
+  button.textContent = "正在生成…";
+  button.disabled = true;
+  try {
+    const res = await fetch("/api/chat/speak", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: message.content.slice(0, 2000),
+        voice_id: state.settings.voice_id,
+      }),
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || "朗读失败");
+    const buffer = await (await res.blob()).arrayBuffer();
+    // 会话已经切走 / 用户已停止：丢弃这段音频
+    if (token !== player.generation) return;
+    const pcm = new Int16Array(buffer, 44, Math.floor((buffer.byteLength - 44) / 2));
+    const floats = new Float32Array(pcm.length);
+    for (let i = 0; i < pcm.length; i++) floats[i] = pcm[i] / 32768;
+    player.playWhole(floats, state.audioRate, token);
+    button.textContent = "朗读中…";
+  } catch (err) {
+    if (err.name !== "AbortError") toast(err.message, true);
+  } finally {
+    // 只有这条消息的按钮还在文档里才复原，切走后按钮已经不存在了
+    if (button.isConnected && speakAbort === controller) {
+      button.textContent = original;
+      button.disabled = false;
+    }
+    if (speakAbort === controller) speakAbort = null;
+  }
 }
 
 function applyTheme() {

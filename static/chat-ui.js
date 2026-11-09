@@ -130,6 +130,16 @@ function renderThread() {
 
 /* 没有消息时圆形图标居中占满舞台；有消息后缩成顶部标记，
    把剩余高度全部让给消息区（两者都 flex:1 时会把高度对半分）。 */
+/* 离开一段对话时的统一清理：停播、中止朗读请求、恢复图标。
+   之前只调用 player.stop()，正在生成的「重新朗读」不受影响，
+   切到别的对话后会突然出声，图标也停在朗读状态。 */
+function stopAllPlayback() {
+  window.speakAbort?.abort();
+  player.stop();
+  setOrb("idle");
+  syncOrbCursor();
+}
+
 function syncHeroMode() {
   const empty = state.messages.length === 0 && !$("thread").children.length;
   $("hero").classList.toggle("idle-mode", empty);
@@ -142,13 +152,16 @@ function messageHtml(message) {
   const asr = role === "user" && message.input_mode === "voice"
     ? `<span class="tag-asr">语音识别${message.asr_elapsed ? ` · ${Number(message.asr_elapsed).toFixed(2)}s` : ""}</span>` : "";
   const meta = role === "assistant"
-    ? `<div class="msg-meta"><span>${esc(message.llm_model || "")}${message.elapsed ? ` · ${Number(message.elapsed).toFixed(1)}s` : ""}</span>
+    ? `<div class="msg-meta meta-${role}"><span>${esc(message.llm_model || "")}${message.elapsed ? ` · ${Number(message.elapsed).toFixed(1)}s` : ""}</span>
         <button data-speak="${esc(message.id)}">重新朗读</button><button data-copy="${esc(message.id)}">复制</button></div>`
-    : `<div class="msg-meta">${asr}<span>${fmtTime(message.created_at)}</span></div>`;
-  return `<div class="msg ${role}">
-    <div class="avatar">${avatar}</div>
-    <div class="bubble">${esc(message.content)}${message.error ? `<div class="msg-error">${esc(message.error)}</div>` : ""}</div>
-  </div>${meta}`;
+    : `<div class="msg-meta meta-${role}">${asr}<span>${fmtTime(message.created_at)}</span></div>`;
+  return `<div class="msg-block">
+    <div class="msg ${role}">
+      <div class="avatar">${avatar}</div>
+      <div class="bubble">${esc(message.content)}${message.error ? `<div class="msg-error">${esc(message.error)}</div>` : ""}</div>
+    </div>
+    ${meta}
+  </div>`;
 }
 
 function appendLive(role, text = "") {
@@ -194,8 +207,8 @@ function renderSessions() {
 /* 把当前会话写进地址栏：/chat/<id>。
    以前所有会话共用 /chat，刷新永远回到第一个对话，也没法分享某一段。 */
 function syncUrl(sessionId, push = false) {
-  // 会话 id 形如 chat:595584e74239；冒号在 URL 路径里合法，
-  // 只转义会截断路径的 ? 和 #，地址更可读。
+  // 新会话 id 是纯 hex（7a79620e6ed9），老会话带 chat: 前缀。
+  // 冒号在 URL 路径里合法，只转义会截断路径的 ? 和 #。
   const target = sessionId ? `/chat/${sessionId.replace(/[?#]/g, encodeURIComponent)}` : "/chat";
   if (location.pathname === target) return;
   if (push) history.pushState({ sessionId }, "", target);
@@ -214,7 +227,7 @@ function sessionIdFromUrl() {
 
 async function openSession(sessionId, options = {}) {
   if (state.busy) return toast("等这一轮说完再切换对话", true);
-  player.stop();
+  stopAllPlayback();
   try {
     const data = await api(`/api/chat/sessions/${sessionId}`);
     state.sessionId = data.id;
@@ -231,7 +244,7 @@ async function openSession(sessionId, options = {}) {
 
 function newSession() {
   if (state.busy) return toast("等这一轮说完再新建对话", true);
-  player.stop();
+  stopAllPlayback();
   state.sessionId = null;
   state.messages = [];
   syncUrl(null, true);
