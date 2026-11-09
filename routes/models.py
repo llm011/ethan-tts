@@ -33,8 +33,7 @@ def models() -> dict:
 @router.get("/api/models/downloads")
 def downloads() -> dict:
     """Which downloads are running/just finished, with bytes on disk."""
-    with registry._download_lock:
-        active = {k: dict(v) for k, v in registry._downloads.items()}
+    active = registry.active_downloads()
     items = []
     for key, state in active.items():
         if key not in MODELS:

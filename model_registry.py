@@ -143,6 +143,12 @@ def download_state(model_key: str) -> dict:
         return dict(_downloads.get(model_key) or {})
 
 
+def active_downloads() -> dict[str, dict]:
+    """Snapshot of every tracked download, safe to read from any thread."""
+    with _download_lock:
+        return {key: dict(value) for key, value in _downloads.items()}
+
+
 def start_download(model_key: str) -> None:
     """Run the download in a thread, recording progress for the page to poll."""
 
