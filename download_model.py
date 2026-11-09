@@ -17,7 +17,7 @@ import os
 import sys
 import time
 
-from config import DEFAULT_ASR_MODEL, DEFAULT_MODEL, MODELS, MODEL_DIR
+from config import DEFAULT_ASR_MODEL, DEFAULT_MODEL, MODELS, MODEL_DIR, remember_model_root
 from engine import model_installed, model_path
 
 
@@ -65,6 +65,8 @@ def download(model_key: str) -> bool:
         os.environ.update(env)
         if try_download(model_key):
             size = sum(f.stat().st_size for f in model_path(model_key).rglob("*") if f.is_file()) / 1e9
+            # 记住这个目录：以后从别的 checkout 启动也要能找到这份权重。
+            remember_model_root(model_path(model_key).parent)
             print(f"✓ 完成：{model_path(model_key)}（{size:.2f} GB）")
             return True
     print(f"× {model_key} 全部下载方式均失败，请检查网络后重试；已下载分片会保留。", file=sys.stderr)

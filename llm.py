@@ -29,6 +29,24 @@ class ChatConfig:
     temperature: float = .7
     max_tokens: int = 320
     extra_headers: dict[str, str] = field(default_factory=dict)
+    # 默认直连：本机开着系统代理时，httpx 会把请求也塞进代理，直连 API 的
+    # 国内服务（DeepSeek、智谱……）常被重置（Errno 54）。要让模型走代理
+    # 时再显式打开，并把代理地址填在下面。
+    use_proxy: bool = False
+    proxy_url: str = ""
+
+    @property
+    def proxy(self) -> str | None:
+        """显式代理优先；只填了地址没勾开关也认，避免「填了却不生效」。
+
+        返回 None 表示直连（连系统代理也不读）——本机开全局代理时，
+        把模型请求塞进代理是 Errno 54 的主要来源。
+        """
+        return self.proxy_url.strip() or None
+
+    @property
+    def read_env_proxy(self) -> bool:
+        return self.use_proxy and not self.proxy_url.strip()
 
     def generate(self, messages: list[dict],
                  cancel: Callable[[], bool] | None = None) -> Iterator[str]:
@@ -113,7 +131,9 @@ def stream_chat(config: ChatConfig, messages: list[dict],
         "max_tokens": config.max_tokens,
     }
     try:
-        with httpx.Client(timeout=REQUEST_TIMEOUT, follow_redirects=True) as client:
+        with httpx.Client(timeout=REQUEST_TIMEOUT, follow_redirects=True,
+                          trust_env=config.read_env_proxy,
+                          proxy=config.proxy) as client:
             with client.stream("POST", config.endpoint(), headers=headers, json=body) as response:
                 if response.status_code >= 400:
                     detail = "".join(response.iter_text())[:400]
@@ -151,7 +171,8 @@ def list_models(config: ChatConfig) -> list[str]:
     headers = {}
     if config.api_key.strip():
         headers["Authorization"] = f"Bearer {config.api_key.strip()}"
-    with httpx.Client(timeout=httpx.Timeout(10.0)) as client:
+    with httpx.Client(timeout=httpx.Timeout(10.0), trust_env=config.read_env_proxy,
+                      proxy=config.proxy) as client:
         response = client.get(f"{base}/models", headers=headers)
         response.raise_for_status()
         data = response.json()

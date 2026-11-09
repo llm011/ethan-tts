@@ -458,11 +458,15 @@ function handleFrame(frame) {
 const handlers = {
   status(data) {
     state.speaking = true;
-    setOrb(data.stage === "asr" ? "thinking" : "thinking",
-      data.stage === "asr" ? "正在识别你的话…" : "我在想…",
-      data.stage === "asr" ? "" : "马上就说");
+    const copy = {
+      asr: ["正在识别你的话…", "马上就好", "正在识别…"],
+      thinking: ["我在想…", "马上就说", "正在思考…"],
+      tts: ["正在准备声音…", "模型首次使用要加载，之后会快很多", "正在合成语音…"],
+    }[data.stage] || ["稍等一下…", "", "处理中…"];
+    setOrb("thinking", copy[0], copy[1]);
     $("typing").hidden = false;
-    $("typing-label").textContent = data.stage === "asr" ? "正在识别…" : "正在思考…";
+    $("typing-label").textContent = copy[2];
+    startWaitTimer(copy[2]);
   },
   asr(data) {
     if (!data.text) return;
@@ -487,6 +491,7 @@ const handlers = {
     $("stop-btn").hidden = false;
   },
   audio(data) {
+    stopWaitTimer();
     $("typing").hidden = true;
     player.play(data.pcm, data.rate || state.settings?.audio_rate || AUDIO_RATE);
   },
@@ -526,6 +531,22 @@ const handlers = {
     });
   },
 };
+
+/* 等待计时：超过 3 秒就把秒数显示出来，让用户知道没卡死。 */
+let waitTimer = null, waitStart = 0;
+function startWaitTimer(label) {
+  stopWaitTimer();
+  waitStart = performance.now();
+  waitTimer = setInterval(() => {
+    const secs = (performance.now() - waitStart) / 1000;
+    if (secs < 3) return;
+    $("typing-label").textContent = `${label.replace(/…$/, "")} · ${secs.toFixed(0)}s`;
+  }, 500);
+}
+function stopWaitTimer() {
+  if (waitTimer) clearInterval(waitTimer);
+  waitTimer = null;
+}
 
 function finishLive() {
   if (state.liveEl) {
@@ -670,6 +691,10 @@ async function bootstrap() {
   idleOrb();
   syncOrbCursor();
   checkSetup();
+  if (state.settings?.configured) {
+    // 后台预热，失败也无所谓；成功了第一次回复就不用等模型加载。
+    fetch("/api/chat/warmup", { method: "POST" }).catch(() => {});
+  }
   if (state.sessions.length) await openSession(state.sessions[0].id);
 }
 

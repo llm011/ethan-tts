@@ -6,6 +6,7 @@ Open http://127.0.0.1:8765 after model download.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import tempfile
 import threading
@@ -33,7 +34,8 @@ from config import (
 )
 from engine import (
     CancelledError, QueueTimeout, SynthesisParams, apply_pronunciations, engine,
-    model_installed, model_size_bytes, resolve_model_key, stream_wav_header,
+    model_installed, model_path, model_size_bytes, resolve_model_key,
+    stream_wav_header,
 )
 
 
@@ -196,10 +198,31 @@ def synthesis_params(req: SynthesisRequest, speaker: dict) -> SynthesisParams:
     )
 
 
+
+def _asset_versioned(html: str) -> str:
+    """给页面引用的静态资源拼内容指纹，彻底绕开浏览器缓存。
+
+    ``no-cache`` 只是让浏览器「去问服务端」，实测仍有浏览器复用内存里的旧
+    文件；把 ?v=<内容哈希> 拼到 URL 上最干脆——内容一变 URL 就变。
+    """
+    import hashlib
+
+    def add_version(match: re.Match) -> str:
+        attr, path = match.group(1), match.group(2)
+        target = STATIC_DIR / path.removeprefix("/static/")
+        try:
+            digest = hashlib.md5(target.read_bytes()).hexdigest()[:10]
+        except OSError:
+            return match.group(0)
+        return f'{attr}="{path}?v={digest}"'
+
+    return re.sub(r'(href|src)="(/static/[^"?]+)"', add_version, html)
+
+
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return HTMLResponse(
-        (STATIC_DIR / "index.html").read_text(encoding="utf-8"),
+        _asset_versioned((STATIC_DIR / "index.html").read_text(encoding="utf-8")),
         headers={"Cache-Control": "no-cache, must-revalidate"},
     )
 
@@ -207,7 +230,7 @@ def index() -> str:
 @app.get("/chat", response_class=HTMLResponse)
 def chat_page() -> str:
     return HTMLResponse(
-        (STATIC_DIR / "chat.html").read_text(encoding="utf-8"),
+        _asset_versioned((STATIC_DIR / "chat.html").read_text(encoding="utf-8")),
         headers={"Cache-Control": "no-cache, must-revalidate"},
     )
 
@@ -780,14 +803,70 @@ def models() -> dict:
     return {"items": model_status()}
 
 
+# Download bookkeeping lives in memory: a download belongs to this process, and
+# the page polls it to show progress instead of guessing from a toast.
+_downloads: dict[str, dict] = {}
+_download_lock_guard = threading.Lock()
+
+
+def _dir_bytes(path: Path) -> int:
+    total = 0
+    try:
+        for item in path.rglob("*"):
+            if item.is_file():
+                total += item.stat().st_size
+    except OSError:
+        pass
+    return total
+
+
+def download_state(model_key: str) -> dict:
+    with _download_lock_guard:
+        state = dict(_downloads.get(model_key) or {})
+    return state
+
+
+@app.get("/api/models/downloads")
+def downloads() -> dict:
+    """Which downloads are running/just finished, with bytes on disk."""
+    with _download_lock_guard:
+        active = {k: dict(v) for k, v in _downloads.items()}
+    items = []
+    for key, state in active.items():
+        if key not in MODELS:
+            size = 0
+        elif MODELS[key]["role"] == "asr":
+            size = stt.asr_model_size_bytes(key)
+        else:
+            size = model_size_bytes(key)
+        target = (MODELS[key].get("size_gb") or 0) * 1e9
+        items.append({
+            "model_key": key,
+            "status": state.get("status", "running"),   # running / done / error
+            "downloaded": size,
+            "total": int(target) or None,
+            "percent": round(min(1.0, size / target) * 100, 1) if target else None,
+            "message": state.get("message", ""),
+        })
+    return {"items": items}
+
+
 @app.post("/api/models/download")
 def download_model(req: ModelDownload) -> dict:
     if req.model_key not in MODELS:
         raise HTTPException(400, "不支持的模型")
     if model_installed(req.model_key):
         return {"ok": True, "installed": True, "message": "模型已经下载"}
-    if not model_download_lock.acquire(blocking=False):
-        raise HTTPException(409, "已有模型正在下载，请稍候")
+    # Claim the slot before starting anything: two clicks (or two tabs) used to
+    # race past this check and launch two downloaders for the same weights.
+    with _download_lock_guard:
+        running = [k for k, v in _downloads.items() if v.get("status") == "running"]
+        if req.model_key in running:
+            raise HTTPException(409, "这个模型正在下载中，请稍候")
+        if running:
+            raise HTTPException(409, f"{MODELS[running[0]]['name']} 正在下载，同一时间只下载一个模型")
+        _downloads[req.model_key] = {"status": "running", "message": "正在下载"}
+
     import subprocess
     import sys
 
@@ -801,13 +880,15 @@ def download_model(req: ModelDownload) -> dict:
             if result.returncode:
                 raise RuntimeError((result.stderr or result.stdout)[-1500:])
             db.log("INFO", "model", f"模型下载完成：{req.model_key}")
+            with _download_lock_guard:
+                _downloads[req.model_key] = {"status": "done", "message": "下载完成"}
         except Exception as exc:
             db.log("ERROR", "model", f"模型下载失败：{exc}")
-        finally:
-            model_download_lock.release()
+            with _download_lock_guard:
+                _downloads[req.model_key] = {"status": "error", "message": str(exc)[:300]}
 
     threading.Thread(target=run_download, name="model-download", daemon=True).start()
-    return {"ok": True, "installed": False, "message": "已开始后台下载，请留意日志"}
+    return {"ok": True, "installed": False, "message": "已开始后台下载", "status": "running"}
 
 
 @app.post("/api/models/unload")
@@ -816,7 +897,6 @@ def unload_models() -> dict:
     return {"ok": True, **engine.resource_snapshot()}
 
 
-model_download_lock = threading.Lock()
 
 # Overwritten by the CLI entry point; the API reports these back to the page.
 _BIND_HOST = os.environ.get("HOST", "127.0.0.1")
@@ -834,6 +914,8 @@ class ChatSettingsPatch(BaseModel):
     llm_api_key: str | None = Field(default=None, max_length=300)
     llm_model: str | None = Field(default=None, max_length=120)
     llm_temperature: float | None = Field(default=None, ge=0, le=2)
+    llm_use_proxy: bool | None = None
+    llm_proxy_url: str | None = Field(default=None, max_length=200)
     llm_max_tokens: int | None = Field(default=None, ge=64, le=2048)
     system_prompt: str | None = Field(default=None, max_length=4000)
     voice_id: str | None = None
@@ -889,6 +971,34 @@ def _voice_rows():
             "SELECT id,name,kind,description,speaker,language FROM voices "
             "ORDER BY is_preset DESC, is_favorite DESC, created_at",
         ).fetchall()
+
+
+@app.post("/api/chat/warmup")
+def chat_warmup() -> dict:
+    """Preload the chat models while the user is still reading the page.
+
+    Loading TTS takes ~11 s cold; doing it on the first reply means the user
+    stares at a spinner right after speaking. Warming up on page open moves
+    that cost to a moment where nothing is expected yet.
+    """
+    settings = db.get_chat_settings()
+    voice = db.voice_for_engine(settings["voice_id"])
+
+    def warm() -> None:
+        if voice:
+            try:
+                engine.load(resolve_model_key(voice))
+            except Exception as exc:
+                db.log("WARNING", "chat", f"预热合成模型失败：{exc}")
+        key = settings["asr_model"]
+        if stt.asr_model_installed(key):
+            try:
+                stt.stt.load(key)
+            except Exception as exc:
+                db.log("WARNING", "chat", f"预热识别模型失败：{exc}")
+
+    threading.Thread(target=warm, name="chat-warmup", daemon=True).start()
+    return {"ok": True}
 
 
 @app.get("/api/chat/settings")
