@@ -228,7 +228,9 @@ def index() -> str:
 
 
 @app.get("/chat", response_class=HTMLResponse)
-def chat_page() -> str:
+@app.get("/chat/{session_id}", response_class=HTMLResponse)
+def chat_page(session_id: str = "") -> str:
+    """对话页。带 session_id 时前端会直接打开那段对话，所以刷新和分享都可用。"""
     return HTMLResponse(
         _asset_versioned((STATIC_DIR / "chat.html").read_text(encoding="utf-8")),
         headers={"Cache-Control": "no-cache, must-revalidate"},

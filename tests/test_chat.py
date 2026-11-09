@@ -236,3 +236,11 @@ def test_bootstrap_reports_config_warning(client):
     assert client.get("/api/chat/bootstrap").json()["config_warning"]
     db.update_chat_settings({"llm_base_url": "http://127.0.0.1:8787/v1", "llm_model": "real"})
     assert client.get("/api/chat/bootstrap").json()["config_warning"] == ""
+
+
+def test_chat_session_deep_link_is_served(client):
+    """带会话 id 的地址要能直接打开页面，刷新和分享才不会 404。"""
+    for path in ("/chat", "/chat/chat:8d07e76b0cab", "/chat/chat%3A8d07e76b0cab"):
+        response = client.get(path)
+        assert response.status_code == 200, path
+        assert "chat.js" in response.text
