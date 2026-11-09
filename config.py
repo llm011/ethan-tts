@@ -63,37 +63,43 @@ HOME_DIR = _home_dir()
 MODEL_ROOTS_FILE = HOME_DIR / "model-roots.json"
 
 
-def remembered_model_roots() -> list[Path]:
-    """曾经真正放权重的目录。
+def _remembered_model_roots() -> list[Path]:
+    """以前用过的权重目录（跨安装形态记住）。
 
-    只靠「用户目录 + 当前源码目录」不够：用 uv tool 装出来时 ROOT 在
-    site-packages 里，而权重可能还留在当初 git clone 的目录；换 worktree
-    也一样。记住用过一次的目录，模型就不会凭空「消失」。
+    为什么需要它：从 clone 安装换成 uv tool 安装后，`ROOT` 变成 site-packages，
+    `ROOT / "models"` 指向一个根本不存在的地方——源码旁那 4 GB 权重就彻底找不到了。
+    所以源码运行时把「我的 models 在这」写下来，装成 wheel 后还能顺着记录找回去。
     """
     try:
-        data = json.loads(MODEL_ROOTS_FILE.read_text(encoding="utf-8"))
+        raw = json.loads(MODEL_ROOTS_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
-    # 兼容两种历史写法：{"roots": [...]} 和裸列表。解析失败绝不能影响启动。
-    items = data.get("roots", []) if isinstance(data, dict) else data
-    if not isinstance(items, list):
-        return []
-    return [Path(item) for item in items if isinstance(item, str) and Path(item).is_dir()]
+    roots: list[Path] = []
+    for item in raw if isinstance(raw, list) else []:
+        try:
+            path = Path(item).expanduser().resolve()
+        except (TypeError, ValueError):
+            continue
+        if path.is_dir() and path not in roots:
+            roots.append(path)
+    return roots
 
 
 def remember_model_root(path: Path) -> None:
-    """把某个真正含有权重的目录记下来，下次启动优先复用。"""
+    """记下这个目录里有权重，供之后（可能换了安装形态的）进程复用。"""
+    path = path.resolve()
+    known = _remembered_model_roots()
+    if path in known:
+        return
+    known.append(path)
     try:
-        path = Path(path).resolve()
-        roots = [p for p in remembered_model_roots() if p != path]
-        roots.insert(0, path)
         MODEL_ROOTS_FILE.parent.mkdir(parents=True, exist_ok=True)
         MODEL_ROOTS_FILE.write_text(
-            json.dumps({"roots": [str(p) for p in roots[:5]]}, ensure_ascii=False),
+            json.dumps([str(item) for item in known], ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
     except OSError:
-        pass
+        pass  # 记不住不算错，下次照样能靠显式环境变量
 
 
 def model_roots() -> list[Path]:
@@ -102,16 +108,17 @@ def model_roots() -> list[Path]:
     权重动辄数 GB，且老用户手里已经下好了一堆。单靠「哪个目录有内容」
     会做出错误判断：新目录里只重下了一个模型，源码旁另外三个就被判成
     「未下载」。所以按模型逐个找：谁先有这个模型就先用谁的。
+
+    顺序：显式环境变量 > 用户目录 > 历史记录过的目录 > 当前代码旁。
     """
     explicit = os.environ.get("ETHAN_TTS_MODEL_DIR")
     if explicit:
         return [Path(explicit).expanduser().resolve()]
-    roots = [MODEL_DIR, ROOT / "models", *remembered_model_roots()]
-    seen: list[Path] = []
-    for root in roots:
-        if root not in seen:
-            seen.append(root)
-    return seen
+    roots: list[Path] = []
+    for root in [MODEL_DIR, *_remembered_model_roots(), ROOT / "models"]:
+        if root not in roots:
+            roots.append(root)
+    return roots
 
 
 DATA_DIR = _pick("data", "ETHAN_TTS_DATA_DIR", ROOT / "data")
@@ -126,6 +133,11 @@ LOG_DIR = DATA_DIR / "logs"
 PID_FILE = DATA_DIR / "server.lock"
 MODEL_DIR = _pick("models", "ETHAN_TTS_MODEL_DIR", ROOT / "models")
 MODEL_ROOTS = model_roots()
+
+# 源码运行时，把「权重就在我旁边」这件事记下来：之后用 uv tool / pip 装成 wheel，
+# ROOT 会变成 site-packages，靠这条记录才找得回源码旁的旧权重。
+if _has_content(ROOT / "models"):
+    remember_model_root(ROOT / "models")
 
 for directory in (DATA_DIR, ARTIFACT_DIR, VOICE_DIR, LOG_DIR):
     directory.mkdir(parents=True, exist_ok=True)
