@@ -74,8 +74,11 @@ def _remembered_model_roots() -> list[Path]:
         raw = json.loads(MODEL_ROOTS_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
+    # 兼容两种写法：早期试跑留下的是 {"roots": [...]}，现在写的是裸列表。
+    # 读不出来就等于「没记录过」，会让装成 wheel 的用户白丢老权重——所以两种都认。
+    items = raw.get("roots") if isinstance(raw, dict) else raw
     roots: list[Path] = []
-    for item in raw if isinstance(raw, list) else []:
+    for item in items if isinstance(items, list) else []:
         try:
             path = Path(item).expanduser().resolve()
         except (TypeError, ValueError):
