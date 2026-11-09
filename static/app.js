@@ -47,7 +47,7 @@ function navigate(view) {
   if (view === "artifacts") loadArtifacts();
   if (view === "tasks") loadTasks();
   if (view === "logs") loadLogs();
-  if (view === "settings") { renderSettings(); loadModels(); loadChatSettings(); }
+  if (view === "settings") { renderSettings(); loadModels(); loadChatSettings(); loadDownloads(); }
 }
 document.querySelectorAll("[data-view]").forEach(el => el.addEventListener("click", () => navigate(el.dataset.view)));
 document.querySelectorAll("[data-nav]").forEach(el => el.addEventListener("click", () => navigate(el.dataset.nav)));
@@ -337,6 +337,36 @@ $("clear-logs").addEventListener("click",async()=>{if(confirm("确定清空全�
 
 function renderSettings(){const s=state.settings;if(!s.max_chars)return;$("setting-voice").value=s.default_voice_id;$("setting-chars").value=s.max_chars;$("setting-sentence").value=s.sentence_chars;$("setting-interval").value=s.streaming_interval;$("setting-autoplay").checked=s.autoplay;$("char-max").textContent=s.max_chars;$("synth-text").maxLength=s.max_chars;}
 $("save-settings").addEventListener("click",async()=>{setBusy("save-settings",true);try{state.settings=await api("/api/settings",{method:"PATCH",body:JSON.stringify({default_voice_id:$("setting-voice").value,max_chars:Number($("setting-chars").value),sentence_chars:Number($("setting-sentence").value),streaming_interval:Number($("setting-interval").value),autoplay:$("setting-autoplay").checked})});renderSettings();$("settings-status").textContent="设置已保存";toast("设置已保存");}catch(e){toast(e.message,true);}finally{setBusy("save-settings",false);}});
+/* 下载按钮的三种状态：可点、下载中（禁用 + 进度）、失败可重试。
+   状态来自服务端轮询，而不是点击时的临时变量——否则 5 秒一次的
+   loadModels 重渲染会把「下载中」冲掉，按钮又变回可点。 */
+function downloadControl(m, compact=false) {
+  const job = state.downloads[m.key];
+  const label = compact ? "下载 ↗" : "下载模型 ↗";
+  const sizeText = m.size_label ? ` · ${esc(m.size_label)}` : "";
+  if (job && job.status === "running") {
+    const pct = job.percent == null ? "" : `${job.percent}%`;
+    const bar = job.percent == null ? "" :
+      `<span class="dl-bar"><i style="width:${Math.max(2, job.percent)}%"></i></span>`;
+    return `<div class="dl-progress" data-dl="${esc(m.key)}">${bar}<span>下载中${pct ? ` ${pct}` : ""}…</span></div>`;
+  }
+  if (job && job.status === "error") {
+    return `<button class="${compact ? "text-button" : "button secondary"}" data-download-model="${esc(m.key)}" title="${esc(job.message || "")}">重试下载 ↻</button>`;
+  }
+  return `<button class="${compact ? "text-button" : "button secondary"}" data-download-model="${esc(m.key)}">${label}${sizeText}</button>`;
+}
+
+async function loadDownloads(){
+  try{
+    const data=await api("/api/models/downloads");
+    const next={};
+    for(const item of data.items||[]) next[item.model_key]=item;
+    const changed=JSON.stringify(next)!==JSON.stringify(state.downloads);
+    state.downloads=next;
+    if(changed){ if(state.current==="settings") loadModels(); }
+  }catch(e){ /* 轮询失败不打扰用户 */ }
+}
+
 async function loadModels(){
   try{
     const data=await api("/api/models");
@@ -344,14 +374,14 @@ async function loadModels(){
     state.modelsByRole={tts:data.items.filter(m=>m.role==="tts"),asr:data.items.filter(m=>m.role==="asr")};
     updateSelectedVoice();
     const size=m=>m.size_label?`<span class="model-size">${esc(m.size_label)}</span>`:"";
-    const card=m=>`<div class="model-item"><div class="model-item-title"><span>${esc(m.name)}${size(m)}</span><span class="tag ${m.installed?"installed":""}">${m.loaded?"运行中":m.installed?"已下载":"未下载"}</span></div><p>${esc(m.description)}</p>${m.installed?"":`<button class="button secondary" data-download-model="${m.key}">下载模型 ↗${m.size_label?` · ${esc(m.size_label)}`:""}</button>`}</div>`;
+    const card=m=>`<div class="model-item"><div class="model-item-title"><span>${esc(m.name)}${size(m)}</span><span class="tag ${m.installed?"installed":""}">${m.loaded?"运行中":m.installed?"已下载":"未下载"}</span></div><p>${esc(m.description)}</p>${m.installed?"":downloadControl(m)}</div>`;
     $("model-list").innerHTML=state.modelsByRole.tts.map(card).join("");
     const asrList=$("asr-list");
     if(asrList){
       asrList.innerHTML=state.modelsByRole.asr.map(m=>`<div class="asr-card${m.key===state.chat.asr_model?" active":""}">
         <strong>${esc(m.name)}${m.size_label?`<span class="model-size">${esc(m.size_label)}</span>`:""}</strong><p>${esc(m.description)}</p>
         <span class="tag ${m.installed?"installed":""}">${m.loaded?"运行中":m.installed?"已下载":"未下载"}</span>
-        ${m.installed?"":`<button class="text-button" data-download-model="${m.key}">下载 ↗${m.size_label?` · ${esc(m.size_label)}`:""}</button>`}</div>`).join("");
+        ${m.installed?"":downloadControl(m, true)}</div>`).join("");
       const select=$("setting-asr-model");
       if(select) select.innerHTML=state.modelsByRole.asr.map(m=>`<option value="${esc(m.key)}">${esc(m.name)}${m.installed?"":"（未下载）"}</option>`).join("");
       const total=$("models-total");
@@ -363,7 +393,19 @@ async function loadModels(){
     }
   }catch(e){toast(e.message,true);}
 }
-async function startModelDownload(key,button,showLogs=false){button.disabled=true;const old=button.textContent;button.textContent="下载中…";try{const r=await api("/api/models/download",{method:"POST",body:JSON.stringify({model_key:key})});toast(r.message);if(showLogs)navigate("logs");}catch(e){toast(e.message,true);button.disabled=false;button.textContent=old;}}
+async function startModelDownload(key,button,showLogs=false){
+  button.disabled=true;
+  try{
+    const r=await api("/api/models/download",{method:"POST",body:JSON.stringify({model_key:key})});
+    toast(r.message);
+    await loadDownloads();
+    await loadModels();
+  }catch(e){
+    toast(e.message,true);
+    button.disabled=false;
+    await loadDownloads();
+  }
+}
 ["model-list","asr-list"].forEach(id=>{const el=$(id);if(el)el.addEventListener("click",e=>{const b=e.target.closest("[data-download-model]");if(b)startModelDownload(b.dataset.downloadModel,b,true);});});
 $("required-model-btn").addEventListener("click",e=>startModelDownload(e.currentTarget.dataset.modelKey,e.currentTarget));
 $("unload-models").addEventListener("click",async()=>{if(!confirm("释放模型内存？下次合成会重新加载模型。"))return;try{await api("/api/models/unload",{method:"POST"});toast("模型内存已释放");loadModels();loadOverview();}catch(e){toast(e.message,true);}});
@@ -478,10 +520,10 @@ async function init(){
     state.settings=await api("/api/settings");
     applyTheme(localStorage.getItem("ethan-tts-theme")||state.settings.theme);
     await loadVoices();renderSettings();updateCount();await loadOverview();await loadPronunciations();
-    await loadChatSettings();await loadModels();loadLanAddress();
+    await loadChatSettings();await loadDownloads();await loadModels();loadLanAddress();
     navigate(state.current);
     if (state.current === "settings" && hashTab) showSettingsTab(hashTab);
-    state.poll=setInterval(()=>{loadOverview();if(state.current==="tasks")loadTasks();if(state.current==="settings")loadModels();},5000);
+    state.poll=setInterval(()=>{loadOverview();if(state.current==="tasks")loadTasks();if(state.current==="settings"){loadModels();loadDownloads();}},5000);
   }catch(e){toast(`初始化失败：${e.message}`,true);}
 }
 init();
@@ -537,6 +579,11 @@ function renderChatSettings() {
   if ($("setting-tts-max")) $("setting-tts-max").value = c.tts_max_chars ?? 60;
   if ($("setting-speech-rate")) $("setting-speech-rate").value = c.speech_rate ?? 1;
   if ($("setting-history")) $("setting-history").value = c.history_turns ?? 8;
+  if ($("setting-use-proxy")) {
+    $("setting-use-proxy").checked = !!c.llm_use_proxy;
+    $("proxy-row").hidden = !c.llm_use_proxy;
+  }
+  if ($("setting-proxy-url")) $("setting-proxy-url").value = c.llm_proxy_url || "";
   if ($("setting-asr-model") && c.asr_model) $("setting-asr-model").value = c.asr_model;
   if ($("api-key-hint")) {
     $("api-key-hint").textContent = c.has_api_key
@@ -575,8 +622,14 @@ function modelPayload() {
   };
   const key = $("setting-api-key").value.trim();
   if (key) payload.llm_api_key = key;
+  payload.llm_use_proxy = $("setting-use-proxy").checked;
+  payload.llm_proxy_url = $("setting-proxy-url").value.trim();
   return payload;
 }
+
+$("setting-use-proxy").addEventListener("change", () => {
+  $("proxy-row").hidden = !$("setting-use-proxy").checked;
+});
 
 $("save-model").addEventListener("click", async () => {
   const ok = await saveChatPatch(modelPayload(), $("model-status"), "模型设置已保存");

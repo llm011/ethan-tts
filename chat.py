@@ -147,6 +147,8 @@ def chat_config(settings: dict[str, Any] | None = None) -> llm.ChatConfig:
         model=settings["llm_model"],
         temperature=float(settings["llm_temperature"]),
         max_tokens=int(settings["llm_max_tokens"]),
+        use_proxy=bool(settings.get("llm_use_proxy")),
+        proxy_url=str(settings.get("llm_proxy_url") or ""),
     )
 
 
@@ -297,6 +299,10 @@ def _run_turn(turn: ChatTurn, session_id: str, wav_path, transcript: str | None,
     collected = turn.spoken
     index = 0
     first_audio = True
+    if speech_ready:
+        # 第一句要等 TTS 模型加载（冷启动可达 10 秒），这一步必须让页面知道，
+        # 否则用户只看到图标转圈，不知道是在加载还是在卡死。
+        yield sse("status", {"stage": "tts"})
     while True:
         if turn.is_cancelled():
             break

@@ -1,6 +1,7 @@
 """Central configuration. Runtime files are local and git-ignored."""
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -26,30 +27,96 @@ def _home_dir() -> Path:
     return Path.home() / ".local" / "share" / "ethan-tts"
 
 
-def _pick(name: str, env_key: str, legacy: Path) -> Path:
-    """选一个目录：显式环境变量 > 用户目录 > 源码旁边的老位置（它已经有内容时）。
+def _has_content(path: Path) -> bool:
+    """目录里到底有没有东西——只看 exists() 会被「建了但空」的目录骗到。
 
-    迁移友好：老用户 git clone 装的，models/ 里 1.6 GB 权重原样能用；
-    新用户走用户目录，不碰源码。
+    这个坑真实发生过：新版本第一次启动时创建了空的用户目录，之后判定
+    「用户目录存在」就优先用它，于是源码旁已经下好的 4 GB 权重全部显示成
+    「未下载」，安装流程又白白重下了一份。
+    """
+    try:
+        return path.is_dir() and any(path.iterdir())
+    except OSError:
+        return False
+
+
+def _pick(name: str, env_key: str, legacy: Path) -> Path:
+    """选目录：显式环境变量 > 已经有内容的用户目录 > 有内容的源码目录 > 用户目录。
+
+    迁移友好：老用户 clone 出来的 models/ 原样能用，不会因为升级而重新下载；
+    新用户走用户目录，不碰源码目录。
     """
     explicit = os.environ.get(env_key)
     if explicit:
         return Path(explicit).expanduser().resolve()
     home = _home_dir() / name
-    if home.exists():
+    if _has_content(home):
         return home
-    if legacy.exists():
+    if _has_content(legacy):
         return legacy
     return home
 
 
 HOME_DIR = _home_dir()
+
+
+MODEL_ROOTS_FILE = HOME_DIR / "model-roots.json"
+
+
+def remembered_model_roots() -> list[Path]:
+    """曾经真正放权重的目录。
+
+    只靠「用户目录 + 当前源码目录」不够：用 uv tool 装出来时 ROOT 在
+    site-packages 里，而权重可能还留在当初 git clone 的目录；换 worktree
+    也一样。记住用过一次的目录，模型就不会凭空「消失」。
+    """
+    try:
+        data = json.loads(MODEL_ROOTS_FILE.read_text(encoding="utf-8"))
+        return [Path(item) for item in data.get("roots", []) if Path(item).is_dir()]
+    except (OSError, ValueError):
+        return []
+
+
+def remember_model_root(path: Path) -> None:
+    """把某个真正含有权重的目录记下来，下次启动优先复用。"""
+    try:
+        path = Path(path).resolve()
+        roots = [p for p in remembered_model_roots() if p != path]
+        roots.insert(0, path)
+        MODEL_ROOTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        MODEL_ROOTS_FILE.write_text(
+            json.dumps({"roots": [str(p) for p in roots[:5]]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def model_roots() -> list[Path]:
+    """按优先级列出可以放权重的目录。
+
+    权重动辄数 GB，且老用户手里已经下好了一堆。单靠「哪个目录有内容」
+    会做出错误判断：新目录里只重下了一个模型，源码旁另外三个就被判成
+    「未下载」。所以按模型逐个找：谁先有这个模型就先用谁的。
+    """
+    explicit = os.environ.get("ETHAN_TTS_MODEL_DIR")
+    if explicit:
+        return [Path(explicit).expanduser().resolve()]
+    roots = [MODEL_DIR, ROOT / "models", *remembered_model_roots()]
+    seen: list[Path] = []
+    for root in roots:
+        if root not in seen:
+            seen.append(root)
+    return seen
+
+
 DATA_DIR = _pick("data", "ETHAN_TTS_DATA_DIR", ROOT / "data")
 DB_PATH = DATA_DIR / "ethan_tts.db"
 ARTIFACT_DIR = DATA_DIR / "artifacts"
 VOICE_DIR = DATA_DIR / "voices"
 LOG_DIR = DATA_DIR / "logs"
 MODEL_DIR = _pick("models", "ETHAN_TTS_MODEL_DIR", ROOT / "models")
+MODEL_ROOTS = model_roots()
 
 for directory in (DATA_DIR, ARTIFACT_DIR, VOICE_DIR, LOG_DIR):
     directory.mkdir(parents=True, exist_ok=True)
@@ -187,6 +254,9 @@ CHAT_DEFAULTS = {
     "llm_model": "",
     "llm_temperature": 0.7,
     "llm_max_tokens": 320,
+    # 默认直连。系统开着代理时，httpx 会把 API 请求也塞进去导致连接被重置。
+    "llm_use_proxy": False,
+    "llm_proxy_url": "",
     "system_prompt": DEFAULT_SYSTEM_PROMPT,
     "voice_id": "preset:Vivian",
     "asr_model": DEFAULT_ASR_MODEL,

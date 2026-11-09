@@ -135,6 +135,8 @@
             <div class="setting-row stack"><div><strong>模型名称</strong><p>例如 deepseek-chat、gpt-4o-mini、qwen2.5:7b</p></div>
               <div class="key-row"><input class="input" id="setting-model" placeholder="deepseek-chat" autocomplete="off" list="model-options"><datalist id="model-options"></datalist><button class="button secondary small" id="fetch-models">读取列表</button></div></div>
             <div class="setting-row"><div><strong>温度</strong><p>0–2；对话建议 0.5–0.8</p></div><div class="unit-input"><input type="number" class="input" id="setting-temperature" min="0" max="2" step=".1"></div></div>
+            <div class="setting-row"><div><strong>走系统代理</strong><p>Windows/macOS 开着全局代理时，直连失败的才需要打开</p></div><label class="switch"><input type="checkbox" id="setting-use-proxy"><span></span></label></div>
+            <div class="setting-row stack" id="proxy-row" hidden><div><strong>代理地址</strong><p>留空则使用系统代理，例如 http://127.0.0.1:7890</p></div><input class="input" id="setting-proxy-url" placeholder="http://127.0.0.1:7890" autocomplete="off"></div>
             <div class="setting-row"><div><strong>最大回复长度</strong><p>64–2048 tokens；语音对话不需要很长</p></div><div class="unit-input"><input type="number" class="input" id="setting-max-tokens" min="64" max="2048" step="16"></div></div>
             <div class="settings-actions"><span class="muted" id="model-status"></span><button class="button secondary" id="test-model">测试连接</button><button class="button primary" id="save-model">保存模型设置</button></div>
           </div><div class="panel settings-panel"><h2>回答风格</h2><p class="panel-description">这段 system prompt 决定模型怎么说话。语音对话最怕长段落，所以默认约束了长度、去掉了 Markdown，并要求数字口语化。</p>
