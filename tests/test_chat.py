@@ -217,3 +217,22 @@ def test_network_and_manifest(client):
     assert isinstance(network["urls"], list) and "port" in network
     assert client.get("/chat.webmanifest").status_code == 200
     assert client.get("/chat").status_code == 200
+
+
+def test_placeholder_base_url_is_flagged_without_false_positives():
+    """占位地址要能认出来，但 localhost / 带 test- 的真实域名不能误伤。"""
+    assert application.config_warning("http://fake/v1")
+    assert application.config_warning("https://example.com/v1")
+    for url in ("http://localhost:11434/v1",           # Ollama 默认
+                "https://test-api.company.com/v1",     # 真实域名里有 test
+                "https://api.deepseek.com/v1",
+                "http://127.0.0.1:8787/v1",
+                ""):
+        assert application.config_warning(url) == "", url
+
+
+def test_bootstrap_reports_config_warning(client):
+    db.update_chat_settings({"llm_base_url": "http://fake/v1", "llm_model": "fake"})
+    assert client.get("/api/chat/bootstrap").json()["config_warning"]
+    db.update_chat_settings({"llm_base_url": "http://127.0.0.1:8787/v1", "llm_model": "real"})
+    assert client.get("/api/chat/bootstrap").json()["config_warning"] == ""

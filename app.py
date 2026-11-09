@@ -944,7 +944,9 @@ class ModelTestRequest(BaseModel):
 
 # 开发自测时常把地址写成这些，一旦残留在用户库里，报错会变成
 # 「无法连接模型服务：nodename nor servname」，很难联想到是配置问题。
-_FAKE_HOSTS = ("fake", "example.com", "localhost:1", "test")
+# 只匹配「整个主机名就是占位词」的情况：子串匹配会误伤
+# localhost:11434（Ollama）和 test-api.company.com 这类真实地址。
+_FAKE_HOSTS = {"fake", "fake.local", "example.com", "example.org", "test", "placeholder"}
 
 
 def config_warning(base_url: str) -> str:
@@ -952,11 +954,10 @@ def config_warning(base_url: str) -> str:
     url = (base_url or "").strip().lower()
     if not url:
         return ""
-    try:
-        host = url.split("://", 1)[-1].split("/", 1)[0]
-    except IndexError:
-        return ""
-    if any(marker in host for marker in _FAKE_HOSTS):
+    host = url.split("://", 1)[-1].split("/", 1)[0]
+    # 去掉端口再看，localhost:11434 属于正常用法
+    bare = host.rsplit(":", 1)[0] if ":" in host else host
+    if bare in _FAKE_HOSTS or bare.startswith("fake."):
         return f"模型地址看起来是测试用的占位值（{host}），请在设置页改成真实的服务地址"
     return ""
 
