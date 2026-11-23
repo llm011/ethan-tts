@@ -26,9 +26,31 @@ _CJK = r"\u4e00-\u9fff"
 # set_cache_limit 返回 24.4 GB），等于不设上限：每句生成产生的临时缓冲
 # 都留在缓存池里等着复用，批量合成 40 段后 IOAccelerator 区涨到 14.4 GB，
 # 把 24 GB 的机器连同 Docker VM（7.7 GB）一起顶爆，swap 吃到 22 GB、
-# load 常年 7+。留 2 GB 给复用（够覆盖单句的缓冲，避免每句都重新分配），
-# 超出部分立刻还给系统。
-_METAL_CACHE_LIMIT_BYTES = 2 * 1024**3
+# load 常年 7+。
+#
+# 上限取「模型权重的 2 倍，但夹在 [2 GB, 4 GB] 之间」：权重本身也占缓存池，
+# 固定 2 GB 对 design-1.7b（权重 2.3 GB）就太紧了 —— 权重已经超过上限，
+# 生成时的临时缓冲一句都复用不上，每句都得向系统重新申请。实测单句耗时
+# 2 GB 587ms / 4 GB 532ms / 8 GB 522ms / 24 GB 554ms：给到 4 GB 就够，
+# 再大只是把内存占着不还。
+_METAL_CACHE_FLOOR_BYTES = 2 * 1024**3
+_METAL_CACHE_CEILING_BYTES = 4 * 1024**3
+_METAL_CACHE_PER_MODEL_WEIGHT = 2
+
+# 兼容旧名字：测试和外部调用方可能还在引用它（初始值 = 下限）。
+_METAL_CACHE_LIMIT_BYTES = _METAL_CACHE_FLOOR_BYTES
+
+
+def cache_limit_for(model_key: str | None = None) -> int:
+    """这个模型该配多大的 Metal 缓存池。
+
+    没有模型信息时退回下限（导入阶段就是这种情况）。
+    """
+    if not model_key or model_key not in MODELS:
+        return _METAL_CACHE_FLOOR_BYTES
+    weight_bytes = int(MODELS[model_key].get("size_gb", 0) * 1024**3)
+    wanted = weight_bytes * _METAL_CACHE_PER_MODEL_WEIGHT
+    return max(_METAL_CACHE_FLOOR_BYTES, min(wanted, _METAL_CACHE_CEILING_BYTES))
 
 
 def _init_metal_cache_limit() -> None:
@@ -38,7 +60,7 @@ def _init_metal_cache_limit() -> None:
     单独抽成函数是为了让测试能断言「上限真的被设下去了」——写成模块级
     裸调用的话，测试只能看副作用，改坏了也发现不了。
     """
-    mx.set_cache_limit(_METAL_CACHE_LIMIT_BYTES)
+    mx.set_cache_limit(_METAL_CACHE_FLOOR_BYTES)
 
 
 _init_metal_cache_limit()
@@ -303,6 +325,8 @@ class TTSEngine:
         self._cancelled: set[str] = set()
         self._worker: threading.Thread | None = None
         self.default_model = DEFAULT_MODEL
+        # 当前生效的缓存上限；load() 会按模型大小重设，快照据此回报。
+        self._cache_limit = _METAL_CACHE_FLOOR_BYTES
 
     # ----- models and system resources ---------------------------------
     def load(self, model_key: str):
@@ -315,6 +339,9 @@ class TTSEngine:
             # temporarily hold two weight sets in the 24 GB machine's memory.
             self._models.clear()
             mx.clear_cache()
+            # 换模型时重设上限：design-1.7b 的权重比 0.6b 大，固定 2 GB 会让
+            # 权重自己就撑满缓存池，临时缓冲一句都复用不上。
+            self._cache_limit = mx.set_cache_limit(cache_limit_for(model_key))
             from mlx_audio.tts.utils import load_model
 
             started = time.monotonic()
@@ -339,7 +366,7 @@ class TTSEngine:
             # 缓存池占用单独列出来：active 只算正在被引用的缓冲，泄漏发生时
             # active 可能才 2 GB 而 cache 已经十几 GB，只看 active 会漏判。
             "metal_cache_gb": round(mx.get_cache_memory() / 1e9, 2),
-            "metal_cache_limit_gb": round(_METAL_CACHE_LIMIT_BYTES / 1e9, 2),
+            "metal_cache_limit_gb": round(self._cache_limit / 1e9, 2),
             "queue_size": self._queue.qsize(),
             "sample_rate": SAMPLE_RATE,
         }

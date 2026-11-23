@@ -75,16 +75,44 @@ def _params(text: str, *, stream: bool = False) -> "engine_module.SynthesisParam
 
 
 def test_metal_cache_limit_is_bounded():
-    """缓存上限必须设下去，且明显小于整机内存。
+    """导入时的上限必须设下去，且明显小于整机内存。
 
     退化场景：把 ``_init_metal_cache_limit()`` 删掉、或把上限改回默认值，
     批量合成就会重新把整机内存吃光。
     """
-    limit = engine_module.mx.set_cache_limit(engine_module._METAL_CACHE_LIMIT_BYTES)
-    assert limit == engine_module._METAL_CACHE_LIMIT_BYTES
-    # 24 GB 的机器上，2 GB 上限必须远小于整机内存，否则等于没限制。
-    assert engine_module._METAL_CACHE_LIMIT_BYTES <= 4 * 1024**3
-    assert engine_module._METAL_CACHE_LIMIT_BYTES > 0
+    limit = engine_module.mx.set_cache_limit(engine_module._METAL_CACHE_FLOOR_BYTES)
+    assert limit == engine_module._METAL_CACHE_FLOOR_BYTES
+    # 24 GB 的机器上，上限必须远小于整机内存，否则等于没限制。
+    assert engine_module._METAL_CACHE_FLOOR_BYTES <= 4 * 1024**3
+    assert engine_module._METAL_CACHE_FLOOR_BYTES > 0
+    # 天花板也不能反过来比下限还小，否则 min() 会选出个荒唐值。
+    assert engine_module._METAL_CACHE_CEILING_BYTES >= engine_module._METAL_CACHE_FLOOR_BYTES
+
+
+def test_cache_limit_scales_with_model_size():
+    """上限要跟着模型权重走，别让权重自己就把缓存池撑满。
+
+    design-1.7b 的权重是 2.3 GB —— 固定 2 GB 上限时权重本身已经超了，
+    生成时的临时缓冲一句都复用不上。这条测试锁住「大模型的限额必须比
+    小模型大」这个性质。
+    """
+    small = engine_module.cache_limit_for("custom-0.6b-4bit")
+    large = engine_module.cache_limit_for("design-1.7b-4bit")
+
+    assert small >= engine_module._METAL_CACHE_FLOOR_BYTES
+    assert large > small, "1.7B 模型的缓存上限应当大于 0.6B"
+    # 大模型的权重本身必须装得下，否则缓存池被权重占满、临时缓冲无法复用。
+    weight = engine_module.MODELS["design-1.7b-4bit"]["size_gb"] * 1024**3
+    assert large >= weight, "上限必须至少容得下模型权重"
+    # 无论多大都不许超过天花板，否则又变成「占着不还」。
+    for key in engine_module.MODELS:
+        assert engine_module.cache_limit_for(key) <= engine_module._METAL_CACHE_CEILING_BYTES
+
+
+def test_cache_limit_falls_back_to_floor_without_model():
+    """没有模型信息（导入阶段）时退回下限，不能崩。"""
+    assert engine_module.cache_limit_for(None) == engine_module._METAL_CACHE_FLOOR_BYTES
+    assert engine_module.cache_limit_for("不存在的模型") == engine_module._METAL_CACHE_FLOOR_BYTES
 
 
 def test_synthesize_clears_cache_once_per_sentence(monkeypatch, clear_cache_spy):
@@ -141,5 +169,5 @@ def test_resource_snapshot_reports_cache_memory():
     assert "metal_cache_gb" in snapshot
     assert "metal_cache_limit_gb" in snapshot
     assert snapshot["metal_cache_limit_gb"] == round(
-        engine_module._METAL_CACHE_LIMIT_BYTES / 1e9, 2
+        engine_module._METAL_CACHE_FLOOR_BYTES / 1e9, 2
     )
