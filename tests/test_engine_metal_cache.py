@@ -163,6 +163,50 @@ def test_streaming_synthesis_also_clears_per_sentence(monkeypatch, clear_cache_s
     assert len(clear_cache_spy) == 2
 
 
+def test_load_records_the_new_limit_not_the_returned_previous_one(monkeypatch):
+    """load() 记录的必须是新上限，不能是 set_cache_limit 的返回值。
+
+    ``mx.set_cache_limit`` 返回的是**旧**上限（实测：设 3 GB 返回 2 GB）。
+    直接 ``self._cache_limit = mx.set_cache_limit(x)`` 会让快照永远慢一拍 ——
+    这个 bug 真的写出来过，跑真实合成时 /health 报 2.15 而不是 3.4 才发现。
+    """
+    eng = engine_module.TTSEngine()
+    eng._cache_limit = engine_module._METAL_CACHE_FLOOR_BYTES
+
+    recorded = {}
+
+    def fake_set_limit(limit):
+        recorded["set"] = limit
+        return 123  # 故意返回一个「旧值」，模拟 MLX 的真实语义
+
+    monkeypatch.setattr(engine_module.mx, "set_cache_limit", fake_set_limit)
+    monkeypatch.setattr(engine_module, "model_installed", lambda _k: True)
+    monkeypatch.setattr(engine_module, "model_path", lambda _k: "/fake/path")
+    monkeypatch.setattr(engine_module.mx, "clear_cache", lambda: None)
+    monkeypatch.setattr(engine_module.db, "log", lambda *a, **k: None)
+
+    # 桩掉真正的模型加载
+    import types
+    fake_utils = types.ModuleType("mlx_audio.tts.utils")
+    fake_utils.load_model = lambda _p: object()
+    fake_pkg = types.ModuleType("mlx_audio")
+    fake_pkg.__path__ = []
+    fake_tts = types.ModuleType("mlx_audio.tts")
+    fake_tts.__path__ = []
+    import sys as _sys
+    monkeypatch.setitem(_sys.modules, "mlx_audio", fake_pkg)
+    monkeypatch.setitem(_sys.modules, "mlx_audio.tts", fake_tts)
+    monkeypatch.setitem(_sys.modules, "mlx_audio.tts.utils", fake_utils)
+
+    eng.load("custom-0.6b-4bit")
+
+    expected = engine_module.cache_limit_for("custom-0.6b-4bit")
+    assert recorded["set"] == expected, "应当把算出来的上限设下去"
+    assert eng._cache_limit == expected, (
+        f"记录的应是新上限 {expected}，而不是返回值 123"
+    )
+
+
 def test_resource_snapshot_reports_cache_memory():
     """快照要带缓存池占用：泄漏时 active 可能很小而 cache 很大。"""
     snapshot = engine_module.TTSEngine().resource_snapshot()

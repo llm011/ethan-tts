@@ -341,7 +341,11 @@ class TTSEngine:
             mx.clear_cache()
             # 换模型时重设上限：design-1.7b 的权重比 0.6b 大，固定 2 GB 会让
             # 权重自己就撑满缓存池，临时缓冲一句都复用不上。
-            self._cache_limit = mx.set_cache_limit(cache_limit_for(model_key))
+            # 注意 mx.set_cache_limit 返回的是「旧的上限」而不是新值，直接
+            # 拿返回值记录会让快照永远慢一拍（实测：设 3 GB 返回 2 GB）。
+            wanted = cache_limit_for(model_key)
+            mx.set_cache_limit(wanted)
+            self._cache_limit = wanted
             from mlx_audio.tts.utils import load_model
 
             started = time.monotonic()
