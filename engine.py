@@ -22,6 +22,49 @@ _SPLIT_RE = re.compile(r"(?<=[。！？；!?;\n])")
 _CANCEL_CHECK = re.compile(r"[^a-zA-Z0-9_-]")
 _CJK = r"\u4e00-\u9fff"
 
+# MLX 的 Metal 缓冲缓存默认上限是「整机内存」（这台 24 GB 机器上实测
+# set_cache_limit 返回 24.4 GB），等于不设上限：每句生成产生的临时缓冲
+# 都留在缓存池里等着复用，批量合成 40 段后 IOAccelerator 区涨到 14.4 GB，
+# 把 24 GB 的机器连同 Docker VM（7.7 GB）一起顶爆，swap 吃到 22 GB、
+# load 常年 7+。
+#
+# 上限取「模型权重的 2 倍，但夹在 [2 GB, 4 GB] 之间」：权重本身也占缓存池，
+# 固定 2 GB 对 design-1.7b（权重 2.3 GB）就太紧了 —— 权重已经超过上限，
+# 生成时的临时缓冲一句都复用不上，每句都得向系统重新申请。实测单句耗时
+# 2 GB 587ms / 4 GB 532ms / 8 GB 522ms / 24 GB 554ms：给到 4 GB 就够，
+# 再大只是把内存占着不还。
+_METAL_CACHE_FLOOR_BYTES = 2 * 1024**3
+_METAL_CACHE_CEILING_BYTES = 4 * 1024**3
+_METAL_CACHE_PER_MODEL_WEIGHT = 2
+
+# 兼容旧名字：测试和外部调用方可能还在引用它（初始值 = 下限）。
+_METAL_CACHE_LIMIT_BYTES = _METAL_CACHE_FLOOR_BYTES
+
+
+def cache_limit_for(model_key: str | None = None) -> int:
+    """这个模型该配多大的 Metal 缓存池。
+
+    没有模型信息时退回下限（导入阶段就是这种情况）。
+    """
+    if not model_key or model_key not in MODELS:
+        return _METAL_CACHE_FLOOR_BYTES
+    weight_bytes = int(MODELS[model_key].get("size_gb", 0) * 1024**3)
+    wanted = weight_bytes * _METAL_CACHE_PER_MODEL_WEIGHT
+    return max(_METAL_CACHE_FLOOR_BYTES, min(wanted, _METAL_CACHE_CEILING_BYTES))
+
+
+def _init_metal_cache_limit() -> None:
+    """Bound MLX's Metal buffer cache at import time.
+
+    必须在模型加载前调用：之后生成过程中的分配才会受这个上限约束。
+    单独抽成函数是为了让测试能断言「上限真的被设下去了」——写成模块级
+    裸调用的话，测试只能看副作用，改坏了也发现不了。
+    """
+    mx.set_cache_limit(_METAL_CACHE_FLOOR_BYTES)
+
+
+_init_metal_cache_limit()
+
 
 def apply_pronunciations(text: str, rules: list[dict]) -> tuple[str, list[str]]:
     """Rewrite terms the model mispronounces, e.g. Qwen -> 千问.
@@ -282,6 +325,8 @@ class TTSEngine:
         self._cancelled: set[str] = set()
         self._worker: threading.Thread | None = None
         self.default_model = DEFAULT_MODEL
+        # 当前生效的缓存上限；load() 会按模型大小重设，快照据此回报。
+        self._cache_limit = _METAL_CACHE_FLOOR_BYTES
 
     # ----- models and system resources ---------------------------------
     def load(self, model_key: str):
@@ -294,6 +339,9 @@ class TTSEngine:
             # temporarily hold two weight sets in the 24 GB machine's memory.
             self._models.clear()
             mx.clear_cache()
+            # 换模型时重设上限：design-1.7b 的权重比 0.6b 大，固定 2 GB 会让
+            # 权重自己就撑满缓存池，临时缓冲一句都复用不上。
+            self._cache_limit = mx.set_cache_limit(cache_limit_for(model_key))
             from mlx_audio.tts.utils import load_model
 
             started = time.monotonic()
@@ -315,6 +363,10 @@ class TTSEngine:
             "loaded_models": list(self._models),
             "metal_active_gb": round(mx.get_active_memory() / 1e9, 2),
             "metal_peak_gb": round(mx.get_peak_memory() / 1e9, 2),
+            # 缓存池占用单独列出来：active 只算正在被引用的缓冲，泄漏发生时
+            # active 可能才 2 GB 而 cache 已经十几 GB，只看 active 会漏判。
+            "metal_cache_gb": round(mx.get_cache_memory() / 1e9, 2),
+            "metal_cache_limit_gb": round(self._cache_limit / 1e9, 2),
             "queue_size": self._queue.qsize(),
             "sample_rate": SAMPLE_RATE,
         }
@@ -362,53 +414,61 @@ class TTSEngine:
             for sentence in split_sentences(p.speakable_text(), p.sentence_chars):
                 if cancelled and cancelled():
                     raise CancelledError("任务已取消")
-                results = self._generate(model, p, sentence, p.stream)
-                if not p.stream:
-                    for result in results:
-                        trimmed = trim_edge_silence(result.audio, sentence)
-                        if p.speed != 1.0:
-                            # Keep the join pause intact; only the speech is
-                            # time-stretched, so the pause is re-appended after.
+                try:
+                    results = self._generate(model, p, sentence, p.stream)
+                    if not p.stream:
+                        for result in results:
+                            trimmed = trim_edge_silence(result.audio, sentence)
+                            if p.speed != 1.0:
+                                # Keep the join pause intact; only the speech is
+                                # time-stretched, so the pause is re-appended after.
+                                pause = int(SAMPLE_RATE * sentence_pause_seconds(sentence))
+                                speech = trimmed[:-pause] if pause and len(trimmed) > pause else trimmed
+                                stretched = change_speed(speech, p.speed)
+                                trimmed = np.concatenate((
+                                    stretched, np.zeros(pause, dtype=np.float32),
+                                ))
+                            yield to_pcm16(trimmed)
+                    elif p.speed != 1.0:
+                        # Tempo change needs the whole sentence, so buffer this
+                        # sentence and emit it at the requested speed. Earlier
+                        # sentences have already been streamed, so first-audio
+                        # latency stays roughly one sentence.
+                        buffer: list[np.ndarray] = []
+                        for result in results:
+                            buffer.append(np.asarray(result.audio, dtype=np.float32).reshape(-1))
+                        if buffer:
+                            joined = trim_edge_silence(np.concatenate(buffer), sentence)
                             pause = int(SAMPLE_RATE * sentence_pause_seconds(sentence))
-                            speech = trimmed[:-pause] if pause and len(trimmed) > pause else trimmed
+                            speech = joined[:-pause] if pause and len(joined) > pause else joined
                             stretched = change_speed(speech, p.speed)
-                            trimmed = np.concatenate((
+                            yield to_pcm16(np.concatenate((
                                 stretched, np.zeros(pause, dtype=np.float32),
-                            ))
-                        yield to_pcm16(trimmed)
-                elif p.speed != 1.0:
-                    # Tempo change needs the whole sentence, so buffer this
-                    # sentence and emit it at the requested speed. Earlier
-                    # sentences have already been streamed, so first-audio
-                    # latency stays roughly one sentence.
-                    buffer: list[np.ndarray] = []
-                    for result in results:
-                        buffer.append(np.asarray(result.audio, dtype=np.float32).reshape(-1))
-                    if buffer:
-                        joined = trim_edge_silence(np.concatenate(buffer), sentence)
-                        pause = int(SAMPLE_RATE * sentence_pause_seconds(sentence))
-                        speech = joined[:-pause] if pause and len(joined) > pause else joined
-                        stretched = change_speed(speech, p.speed)
-                        yield to_pcm16(np.concatenate((
-                            stretched, np.zeros(pause, dtype=np.float32),
-                        )))
-                else:
-                    # One-chunk lookahead lets us trim only the first and last
-                    # chunks without cutting natural pauses inside the segment.
-                    pending: np.ndarray | None = None
-                    for result in results:
-                        if pending is None:
-                            first = trim_edge_silence(result.audio, sentence, trim_end=False)
-                            if not len(first):
+                            )))
+                    else:
+                        # One-chunk lookahead lets us trim only the first and last
+                        # chunks without cutting natural pauses inside the segment.
+                        pending: np.ndarray | None = None
+                        for result in results:
+                            if pending is None:
+                                first = trim_edge_silence(result.audio, sentence, trim_end=False)
+                                if not len(first):
+                                    continue
+                                pending = first
                                 continue
-                            pending = first
-                            continue
-                        yield to_pcm16(pending)
-                        pending = np.asarray(result.audio, dtype=np.float32).reshape(-1)
-                    if pending is not None:
-                        yield to_pcm16(trim_edge_silence(
-                            pending, sentence, trim_start=False, trim_end=True,
-                        ))
+                            yield to_pcm16(pending)
+                            pending = np.asarray(result.audio, dtype=np.float32).reshape(-1)
+                        if pending is not None:
+                            yield to_pcm16(trim_edge_silence(
+                                pending, sentence, trim_start=False, trim_end=True,
+                            ))
+                finally:
+                    # 每句生成完就归还 Metal 缓冲。只靠 set_cache_limit 不够：
+                    # 上限只约束「缓存池」，正在被引用的缓冲仍会累积，而一句
+                    # 内的流式分块（streaming_interval 0.32s）会把整句的激活
+                    # 值都留在池里。逐句回收把峰值钉在「单句」量级，批量合成
+                    # 才不会越跑越胀。
+                    mx.clear_cache()
                 if cancelled and cancelled():
                     raise CancelledError("任务已取消")
         finally:
